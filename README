@@ -1,0 +1,89 @@
+lamegame_tasking
+
+Packages provided:
+  lgTask
+
+Dependencies:
+  pymongo
+
+Summary:
+lamegame_tasking provides a self-organizing task processing framework.  The central database is a mongoDb instance.
+
+Note that all tasks run in threads in a single process.
+
+Example usage:
+Programming a task (must be in a file in tasks directory):
+class MyAppTask(lgTask.Task):
+    def run(taskDb, arg, **kwargs):
+        # Pass mongodb:// conn string to get a pymongo collection, database,
+        # or connection (based on the URL).  This is parameter magic that can
+        # be overridden
+        taskDb['collection'].insert({ 'arg': arg })
+        self.taskConnection.createTask(
+          "MyAppTask"
+          , taskDb=taskDb
+          , arg=arg + 1
+          )
+
+
+
+Programming a task that should abort if an instance is already running:
+class MyAppSingleton(lgTask.SingletonTask):
+    def run(**kwargs):
+        # ...Normal run function
+
+The task is singleton'd based on the "name" parameter, which for classes defaults to the class name.  If you have e.g. a per-database singleton, simply make scheduling or creating the task extract the database name and initialize "name" accordingly.
+
+
+
+Creating a sample task to run:
+>> import lgTask
+>> c = lgTask.Connection()
+>> c.createTask("MyAppTask"[, name="MyAppTaskAltName"], arg="Hello, world!")
+
+
+
+Creating a single-scheduled task to run:
+>> import lgTask
+>> c = lgTask.Connection()
+>> c.createTask("MyAppTask", runAt=[datetime object OR "1 day/hour/minute/second"], arg="Delayed!")
+
+
+
+Create a recurring scheduled task:
+>> import lgTask
+>> c = lgTask.Connection()
+>> c.scheduledTask("MyAppTask", interval="1 day/hour/minute/second"[, runAt=[datetime object OR "1 day/hour/minute/second"])
+
+The runAt parameter may be used to defer the task's interval start time from NOW until the specified time (think of it as startAt; named runAt for consistency).
+
+
+
+Configuring and running processors for development:
+At the beginning of your app's web server / task generator:
+
+>> import lgTask
+>> processor = lgTask.Processor("/path/to/config"[, name="myProcessor"])
+
+This will spawn the processor in a new thread; if you want to block on the processor, use:
+
+>> processor.block()
+
+
+
+Configuring and running processors for production:
+1. Symlink lamegame_tasking/bin/lgTaskProcessor to your PATH (or execute directly)
+
+2. Setup a user to run the task processors; in their home directory, check out your task source code and dependencies.
+
+2. Setup a configuration file for your deployment, like the following (myAppProcessor.cfg):
+
+taskDatabase = 'mongodb://[user:password]@server:port[/mytaskdb]'
+taskFolder = '/home/user/myAppTasks'
+desiredLoad = 100
+
+3. Setup cron to run lgTaskProcessor every minute (to prevent it from erroring out; a processor will automatically not run two instances) with the following parameters:
+  a. Config file - absolute path to task processor configuration
+  b. [optional] Processor name - if unspecified, the host name is used.
+  z. Example: lgTaskProcessor /home/user/myAppProcessor.cfg [processor1]
+
