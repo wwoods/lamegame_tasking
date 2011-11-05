@@ -32,14 +32,17 @@ class MyAppSingleton(lgTask.SingletonTask):
     def run(**kwargs):
         # ...Normal run function
 
-The task is singleton'd based on the "name" parameter, which for classes defaults to the class name.  If you have e.g. a per-database singleton, simply make scheduling or creating the task extract the database name and initialize "name" accordingly.
+The task is singleton'd based on the "taskName" parameter, which for classes 
+defaults to the class name.  If you have e.g. a per-database singleton, simply 
+make scheduling or creating the task extract the database name and initialize 
+"taskName" accordingly.
 
 
 
 Creating a sample task to run:
 >> import lgTask
 >> c = lgTask.Connection()
->> c.createTask("MyAppTask"[, name="MyAppTaskAltName"], arg="Hello, world!")
+>> c.createTask("MyAppTask"[, taskName="MyAppTaskAltName"], arg="Hello, world!")
 
 
 
@@ -55,7 +58,9 @@ Create a recurring scheduled task:
 >> c = lgTask.Connection()
 >> c.scheduledTask("MyAppTask", interval="1 day/hour/minute/second"[, runAt=[datetime object OR "1 day/hour/minute/second"])
 
-The runAt parameter may be used to defer the task's interval start time from NOW until the specified time (think of it as startAt; named runAt for consistency).
+The runAt parameter may be used to defer the task's interval start time from 
+NOW until the specified time (think of it as startAt; named runAt for 
+consistency).
 
 
 
@@ -63,11 +68,17 @@ Configuring and running processors for development:
 At the beginning of your app's web server / task generator:
 
 >> import lgTask
->> processor = lgTask.Processor("/path/to/config"[, name="myProcessor"])
+>> processor = lgTask.Processor("/path/to/config"[, taskName="myProcessor"])
+>> processor.start()
 
-This will spawn the processor in a new thread; if you want to block on the processor, use:
+This will spawn the processor in a new thread.  If you want to specify the 
+config in code, you can pass a dict or lgTask.lib.reprconf.Config object 
+instead of a file path.  
 
->> processor.block()
+If you want to block on the processor until it can no longer consume any
+tasks, use:
+
+>> processor.stop(onNoTasksToConsume=True)
 
 
 
@@ -78,12 +89,15 @@ Configuring and running processors for production:
 
 2. Setup a configuration file for your deployment, like the following (myAppProcessor.cfg):
 
+[taskProcessor] # This name is required; on the bright side, this allows you
+                # to put other configuration items in the file
 taskDatabase = 'mongodb://[user:password]@server:port[/mytaskdb]'
-taskFolder = '/home/user/myAppTasks'
-desiredLoad = 100
+taskDir = '/home/user/myAppTasks'
+[taskName = name [defaults to hostname]]
 
 3. Setup cron to run lgTaskProcessor every minute (to prevent it from erroring out; a processor will automatically not run two instances) with the following parameters:
   a. Config file - absolute path to task processor configuration
-  b. [optional] Processor name - if unspecified, the host name is used.
+  b. [optional] Processor name - if unspecified, the config or host name is 
+      used.
   z. Example: lgTaskProcessor /home/user/myAppProcessor.cfg [processor1]
 

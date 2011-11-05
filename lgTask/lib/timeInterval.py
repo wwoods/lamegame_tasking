@@ -13,8 +13,11 @@ class TimeInterval(timedelta):
 
     Can chain types: 1 hour 2 days
     """
-
-    def __init__(self, desc):
+    
+    def __new__(cls, desc):
+        """Since we derive from timedelta which is special, we must use 
+        __new__.
+        """
         parts = desc.split(' ')
         kwargs = {}
         for i in range(0, len(parts), 2):
@@ -24,5 +27,5 @@ class TimeInterval(timedelta):
                 unit = unit[:-1]
             unit = unit + "s"
             kwargs[unit] = qty
-        timedelta.__init__(self, **kwargs)
-
+        instance = timedelta.__new__(TimeInterval, **kwargs)
+        return instance

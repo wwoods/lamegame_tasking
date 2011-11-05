@@ -1,4 +1,8 @@
+"""lgTask provides lamegame_tasking's functionality.
+"""
 
-def test():
-    a = 'This is an example package!'
-    return a
+from .errors import *
+from .connection import Connection
+from .task import Task
+from .singletonTask import SingletonTask
+from .processor import Processor
