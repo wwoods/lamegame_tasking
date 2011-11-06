@@ -17,8 +17,6 @@ def _encodePyMongo(value):
     if isinstance(value, pymongo.database.Collection):
         userCreds = ''
         db = value.database
-        if hasattr(db, '_dbUser') and db._dbUser is not None:
-            userCreds = db._dbUser + ':' + db._dbPassword + '@'
         return "pymongo://{0}{1}:{2}/{3}/{4}".format(
             userCreds
             , db.connection.host
@@ -29,8 +27,6 @@ def _encodePyMongo(value):
     elif isinstance(value, pymongo.database.Database):
         db = value
         userCreds = ''
-        if hasattr(db, '_dbUser') and db._dbUser is not None:
-            userCreds = db._dbUser + ':' + db._dbPassword + '@'
         return "pymongo://{0}{1}:{2}/{3}".format(
                 userCreds
                 , db.connection.host
@@ -237,10 +233,8 @@ class Connection(object):
         if db is not None:
             db = db[1:] # Trim off leading slash
             c = c[db]
-            c._dbUser = user
-            c._dbPassword = password
-            if c._dbUser is not None:
-                c.authenticate(c._dbUser, c._dbPassword)
+            if user is not None:
+                c.authenticate(user, password)
                 
             if coll is not None:
                 coll = coll[1:] # Trim leading slash
@@ -266,13 +260,9 @@ class Connection(object):
         elif isinstance(cDb, pymongo.database.Database):
             self._connection = cDb.connection
             self._database = cDb
-            self._dbUser = cDb._dbUser
-            self._dbPassword = cDb._dbPassword
         else:
             raise ValueError("Failed to parse: {0}".format(connString))
         
     def _initPyMongoDb(self, db):
         self._connection = db.connection
         self._database = db
-        self._dbUser = None
-        self._dbPassword = None
