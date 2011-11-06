@@ -86,12 +86,22 @@ class Connection(object):
             taskArgs['tsSchedule'] = now
             taskArgs['tsRequest'] = runAt
             
-        taskColl = self._getTasks()
+        taskColl = self._database[self.TASK_COLLECTION]
         taskColl.insert(taskArgs)
+        
+    def ensureIndexes(self):
+        """Assert that all necessary indexes exist in the tasks collections 
+        to maintain performance
+        """
+        db = self._database[self.TASK_COLLECTION]
+        db.ensure_index( [ ('state', 1), ( 'taskClass', 1), ( 'tsRequest', -1 ) ] )
         
     def singletonAcquire(self, taskName, heartbeat):
         """Acquire the singleton running permissions for taskName or 
         raise a SingletonAlreadyRunning exception.
+        
+        Returns the time that heartbeat is set to when we have acquired the 
+.        lock
         """
         c = self._database[self.SINGLETON_COLLECTION]
         # Check if already running, cautious upsert if not.
@@ -124,20 +134,37 @@ class Connection(object):
             if r is None:
                 raise SingletonAlreadyRunning()
             
-    def singletonHeartbeat(self, taskName):
-        """Register a heartbeat for the given singleton.
+        # Return our heartbeat
+        return now
+            
+    def singletonHeartbeat(self, taskName, expectedLast):
+        """Register a heartbeat for the given singleton.  Raises a 
+        SingletonAlreadyRunning error if the last heartbeat does not match the
+        expected heartbeat; this indicates that, at some point, another version
+        of our singleton was started, and we should abort.
+        
+        Returns the new heartbeat value if set OK.
         """
         c = self._database[self.SINGLETON_COLLECTION]
         now = datetime.utcnow()
-        c.update({ '_id': taskName }, { '$set': { 'heartbeat': now } })
+        result = c.find_and_modify(
+            { '_id': taskName, 'heartbeat': expectedLast }
+            , { '$set': { 'heartbeat': now } }
+        )
+        if result is None:
+            raise SingletonAlreadyRunning()
+        return now
         
-    def singletonRelease(self, taskName):
+    def singletonRelease(self, taskName, lastHeartbeat):
         """Assuming we have the singleton for taskName, release it.
         """
         # We already have the lock, so just releasing our heartbeat should
         # be fine.
         c = self._database[self.SINGLETON_COLLECTION]
-        c.update({ '_id': taskName }, { '$unset': { 'heartbeat': 1 } })
+        c.find_and_modify(
+            { '_id': taskName, 'heartbeat': lastHeartbeat }
+            , { '$unset': { 'heartbeat': 1 } }
+        )
         
     def startTask(self, availableTasks):
         """Gets a task from our database and calls its start() method.
@@ -241,12 +268,6 @@ class Connection(object):
                 c = c[coll]
                 
         return c
-        
-    def _getTasks(self):
-        return self._database[self.TASK_COLLECTION]
-    
-    def _getSched(self):
-        return self._database[self.SCHEDULE_COLLECTION]
             
     def _initPyMongo(self, connString):
         """Open up a connection to the given pymongo resource.

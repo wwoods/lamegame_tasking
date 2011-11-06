@@ -39,6 +39,7 @@ class Processor(SingletonTask):
         taskName = taskName or socket.gethostname()
         
         connection = Connection(self.config['lgTaskProcessor']['taskDatabase'])
+        connection.ensureIndexes()
         
         SingletonTask.__init__(self, taskConnection=connection
                 , taskName=taskName)
