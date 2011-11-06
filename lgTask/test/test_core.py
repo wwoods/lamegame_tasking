@@ -54,18 +54,21 @@ class TestCore(TestCase):
         db.insert({ 'id': 'a', 'value': 6 })
         p = lgTask.Processor(self.conf, taskName='test_consumeDelayed')
         p.start()
-        self.conn.createTask("IncValueTask", runAt=TimeInterval('1 second')
-            , db=db, id='a')
-        import time
-        time.sleep(0.5)
-        doc = db.find_one({ 'id': 'a' })
-        self.assertEqual(6, doc['value'])
-        time.sleep(0.3)
-        doc = db.find_one({ 'id': 'a' })
-        self.assertEqual(6, doc['value'])
-        time.sleep(0.3)
-        doc = db.find_one({ 'id': 'a' })
-        self.assertEqual(7, doc['value'])
+        try:
+            self.conn.createTask("IncValueTask", runAt=TimeInterval('1 second')
+                , db=db, id='a')
+            import time
+            time.sleep(0.5)
+            doc = db.find_one({ 'id': 'a' })
+            self.assertEqual(6, doc['value'])
+            time.sleep(0.3)
+            doc = db.find_one({ 'id': 'a' })
+            self.assertEqual(6, doc['value'])
+            time.sleep(0.3)
+            doc = db.find_one({ 'id': 'a' })
+            self.assertEqual(7, doc['value'])
+        finally:
+            p.stop()
         
     
     def test_singletonAssert(self):
