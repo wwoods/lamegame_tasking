@@ -52,7 +52,9 @@ class Connection(object):
     bindingsDecode = [ _decodePyMongo ]
     
     def __init__(self, connString, **kwargs):
-        if connString.startswith("pymongo://"):
+        if isinstance(connString, pymongo.database.Database):
+            self._initPyMongoDb(connString)
+        elif connString.startswith("pymongo://"):
             self._initPyMongo(connString)
         else:
             raise ValueError("Unrecognized connString: {0}".format(connString))
@@ -268,3 +270,9 @@ class Connection(object):
             self._dbPassword = cDb._dbPassword
         else:
             raise ValueError("Failed to parse: {0}".format(connString))
+        
+    def _initPyMongoDb(self, db):
+        self._connection = db.connection
+        self._database = db
+        self._dbUser = None
+        self._dbPassword = None
