@@ -14,10 +14,9 @@ class TestCore(TestCase):
     def setUp(self):
         self.path = os.path.dirname(os.path.abspath(__file__))
         self.conf = Config(os.path.join(self.path, 'testProcessor.cfg'))
-        self.conf = self.conf['taskProcessor']
-        self.conf['taskDir'] = self.conf['taskDir'].replace(
-            "./", self.path + "/")
-        self.conn = lgTask.Connection(self.conf['taskDatabase'])
+        lgp = self.conf['lgTaskProcessor']
+        lgp['taskDir'] = lgp['taskDir'].replace("./", self.path + "/")
+        self.conn = lgTask.Connection(lgp['taskDatabase'])
         self.conn._database.drop_collection('test')
         self.conn._database.drop_collection(self.conn.TASK_COLLECTION)
         self.conn._database.drop_collection(self.conn.SINGLETON_COLLECTION)

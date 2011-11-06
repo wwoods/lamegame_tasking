@@ -28,19 +28,18 @@ class Processor(SingletonTask):
             self.config = config
         elif isinstance(config, basestring):
             self.config = Config(config)
-            self.config = self.config['taskProcessor']
         else:
             raise ValueError("Unrecognized config type")
         
         taskName = taskName or self.config.get('taskName') 
         taskName = taskName or socket.gethostname()
         
-        connection = Connection(self.config['taskDatabase'])
+        connection = Connection(self.config['lgTaskProcessor']['taskDatabase'])
         
         SingletonTask.__init__(self, taskConnection=connection
                 , taskName=taskName)
         
-        self._initTasksAvailable(self.config['taskDir'])
+        self._initTasksAvailable(self.config['lgTaskProcessor']['taskDir'])
         self._tasks = []
         
     def run(self):
