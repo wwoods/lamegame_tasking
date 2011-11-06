@@ -3,12 +3,16 @@ import imp
 import inspect
 import socket
 from lgTask import Connection, Task, SingletonTask
+from lgTask.errors import SingletonAlreadyRunning
 from lgTask.lib.reprconf import Config
+from lgTask.lib.timeInterval import TimeInterval
 import os
 
 class Processor(SingletonTask):
     """Processes tasks for the given db.
     """
+
+    HEARTBEAT_INTERVAL = TimeInterval('0.5 seconds')
     
     def __init__(self, config, taskName=None):
         """Creates a new task processor.
@@ -94,7 +98,7 @@ class Processor(SingletonTask):
             self._tasks.remove(t)
             self.log("Finished task {0}: {1}".format(
                 getattr(t, 'taskName', t.__class__.__name__)
-                , t._logs[-1]
+                , t._logs[-1] if len(t._logs) > 0 else '(no log)'
             ))
                 
         
@@ -107,11 +111,18 @@ class Processor(SingletonTask):
         c = self.taskConnection
         try:
             task = c.startTask(self._tasksAvailable)
+        except SingletonAlreadyRunning:
+            # We don't really care about this from a processor logging
+            # point of view.
+            pass
         except Exception as e:
             self.error("While starting task")
         else:
             if task is not None:
                 self._tasks.append(task)
+                self.log("Started task {0}".format(
+                    getattr(task, 'taskName', task.__class__.__name__)
+                ))
                 return True
         
     def _initTasksAvailable(self, taskDir):
