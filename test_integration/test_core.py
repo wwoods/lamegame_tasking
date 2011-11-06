@@ -48,6 +48,25 @@ class TestCore(TestCase):
             { 'state': 'success' }        
         )
         self.assertEqual("Changed from 6 to 7", doc['lastLog'])
+        
+    def test_consumeDelayed(self):
+        db = self.conn._database['test']
+        db.insert({ 'id': 'a', 'value': 6 })
+        p = lgTask.Processor(self.conf, taskName='test_consumeDelayed')
+        p.start()
+        self.conn.createTask("IncValueTask", runAt=TimeInterval('1 second')
+            , db=db, id='a')
+        import time
+        time.sleep(0.5)
+        doc = db.find_one({ 'id': 'a' })
+        self.assertEqual(6, doc['value'])
+        time.sleep(0.3)
+        doc = db.find_one({ 'id': 'a' })
+        self.assertEqual(6, doc['value'])
+        time.sleep(0.3)
+        doc = db.find_one({ 'id': 'a' })
+        self.assertEqual(7, doc['value'])
+        
     
     def test_singletonAssert(self):
         p = lgTask.Processor(self.conf, taskName="test_singletonAssert")
