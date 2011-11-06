@@ -1,6 +1,7 @@
 
 import ctypes
 import inspect
+from lgTask.lib.compat import cherrypy_subscribe
 from lgTask.lib.interruptableThread import InterruptableThread
 import traceback
 import pymongo
@@ -54,6 +55,7 @@ class Task(object):
         
         self._thread = _TaskThread(self, kwargs)
         self._thread.start()
+        cherrypy_subscribe(self)
         
     def stop(self, timeout=None):
         """Stops the task from running.  Blocks indefinitely with no timeout
