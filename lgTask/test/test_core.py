@@ -3,6 +3,7 @@
 
 import os
 import pymongo
+import time
 from unittest import TestCase
 
 import lgTask
@@ -57,7 +58,6 @@ class TestCore(TestCase):
         try:
             self.conn.createTask("IncValueTask", runAt=TimeInterval('1 second')
                 , db=db, id='a')
-            import time
             time.sleep(0.5)
             doc = db.find_one({ 'id': 'a' })
             self.assertEqual(6, doc['value'])
@@ -84,6 +84,23 @@ class TestCore(TestCase):
         finally:
             p.stop()
             
+    def test_singletonHeartbeat(self):
+        p = lgTask.Processor(self.conf, taskName='test_singletonHeartbeat')
+        p.HEARTBEAT_INTERVAL = TimeInterval('0.1 seconds')
+        p.start()
+        try:
+            time.sleep(0.3)
+            p2 = lgTask.Processor(self.conf, taskName='test_singletonHeartbeat')
+            p2.HEARTBEAT_INTERVAL = p.HEARTBEAT_INTERVAL
+            try:
+                p2.start()
+                p2.stop()
+                self.fail("Should have raised SingletonAlreadyRunning")
+            except lgTask.errors.SingletonAlreadyRunning:
+                pass
+        finally:
+            p.stop()
+            
     def test_singletonReleaseOnStop(self):
         p = lgTask.Processor(self.conf, taskName="test_singletonRelease")
         p2 = lgTask.Processor(self.conf, taskName="test_singletonRelease")
@@ -95,12 +112,12 @@ class TestCore(TestCase):
     def test_singletonReleaseOnTimeout(self):
         p = lgTask.Processor(self.conf, taskName="test_singletonReleaseTime")
         p2 = lgTask.Processor(self.conf, taskName="test_singletonReleaseTime")
-        p.HEARTBEAT_INTERVAL = TimeInterval('0.25 seconds')
+        p.HEARTBEAT_INTERVAL = TimeInterval('0.2 seconds')
         p2.HEARTBEAT_INTERVAL = p.HEARTBEAT_INTERVAL
         p.start()
         # Timeout while circumventing singleton release
         lgTask.Task.stop(p)
-        import time
+        p._stopHeartbeat()
         time.sleep(0.5)
         p2.start()
         p2.stop()

@@ -57,41 +57,6 @@ class Connection(object):
         else:
             raise ValueError("Unrecognized connString: {0}".format(connString))
         
-    def acquireSingleton(self, taskName, heartbeat):
-        """Acquire the singleton running permissions for taskName or 
-        raise a SingletonAlreadyRunning exception.
-        """
-        c = self._database[self.SINGLETON_COLLECTION]
-        # Check if already running, cautious upsert if not.
-        now = datetime.utcnow()
-        maxHeartbeat = now - heartbeat * 2
-        current = c.find_one({ '_id': taskName })
-        if current is None:
-            # None of this singleton have ever run before... try inserting a
-            # record.
-            try: 
-                c.insert(
-                    { '_id': taskName, 'heartbeat': now }
-                    , safe=True
-                )
-            except pymongo.errors.DuplicateKeyError:
-                raise SingletonAlreadyRunning()
-        else:
-            if current.get('heartbeat', datetime.min) >= maxHeartbeat:
-                raise SingletonAlreadyRunning()
-            r = c.find_and_modify(
-                {
-                    '_id': taskName
-                    , 'heartbeat': current.get('heartbeat', None) 
-                }
-                , {
-                    '_id': taskName
-                    , 'heartbeat': now
-                }
-            )
-            if r is None:
-                raise SingletonAlreadyRunning()
-        
     def createTask(self, taskClass, runAt=None, **kwargs):
         for key,value in kwargs.items():
             for binding in self.bindingsEncode:
@@ -126,7 +91,49 @@ class Connection(object):
         taskColl = self._getTasks()
         taskColl.insert(taskArgs)
         
-    def releaseSingleton(self, taskName):
+    def singletonAcquire(self, taskName, heartbeat):
+        """Acquire the singleton running permissions for taskName or 
+        raise a SingletonAlreadyRunning exception.
+        """
+        c = self._database[self.SINGLETON_COLLECTION]
+        # Check if already running, cautious upsert if not.
+        now = datetime.utcnow()
+        maxHeartbeat = now - heartbeat * 2
+        current = c.find_one({ '_id': taskName })
+        if current is None:
+            # None of this singleton have ever run before... try inserting a
+            # record.
+            try: 
+                c.insert(
+                    { '_id': taskName, 'heartbeat': now }
+                    , safe=True
+                )
+            except pymongo.errors.DuplicateKeyError:
+                raise SingletonAlreadyRunning()
+        else:
+            if current.get('heartbeat', datetime.min) >= maxHeartbeat:
+                raise SingletonAlreadyRunning()
+            r = c.find_and_modify(
+                {
+                    '_id': taskName
+                    , 'heartbeat': current.get('heartbeat', None) 
+                }
+                , {
+                    '_id': taskName
+                    , 'heartbeat': now
+                }
+            )
+            if r is None:
+                raise SingletonAlreadyRunning()
+            
+    def singletonHeartbeat(self, taskName):
+        """Register a heartbeat for the given singleton.
+        """
+        c = self._database[self.SINGLETON_COLLECTION]
+        now = datetime.utcnow()
+        c.update({ '_id': taskName }, { '$set': { 'heartbeat': now } })
+        
+    def singletonRelease(self, taskName):
         """Assuming we have the singleton for taskName, release it.
         """
         # We already have the lock, so just releasing our heartbeat should
