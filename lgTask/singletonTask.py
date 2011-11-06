@@ -28,7 +28,7 @@ class SingletonTask(Task):
         self.taskName = taskName or self.__class__.__name__
         Task.__init__(self, taskConnection=taskConnection, taskId=taskId)
         
-    def start(self):
+    def start(self, **kwargs):
         """Override Task.start() to assert singleton status first, and start
         heartbeat.
         """
@@ -36,7 +36,7 @@ class SingletonTask(Task):
             self.taskName, self.HEARTBEAT_INTERVAL
         )
         self._startHeartbeat()
-        Task.start(self)
+        Task.start(self, **kwargs)
         
     def stop(self, **kwargs):
         """Override task.stop() to stop heartbeat and release singleton status.
