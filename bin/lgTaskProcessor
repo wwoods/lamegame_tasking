@@ -1,0 +1,41 @@
+#! /usr/bin/python
+
+import lgTask
+import sys
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: {0} /path/to/config [name]".format(sys.argv[0]))
+        sys.exit(1)
+    config = sys.argv[1]
+    taskName = None
+    if len(sys.argv) >= 3:
+        taskName = sys.argv[2]
+
+    proc = lgTask.Processor(config, taskName=taskName)
+    proc.start()
+
+    def loopForever():
+        import time
+        while True:
+            time.sleep(1)
+
+    # From http://psyco.sourceforge.net/psycoguide/bugs.html:
+    # "The compiled machine code does not include the regular polling
+    # done by Python, meaning that a KeyboardInterrupt will not be
+    # detected before execution comes back to the regular Python
+    # interpreter. Your program cannot be interrupted if caught
+    # into an infinite Psyco-compiled loop."
+    try:
+        sys.modules['psyco'].cannotcompile(loopForever)
+    except (KeyError, AttributeError):
+        pass
+
+    try:
+        print("lgTask.Processor - Started from config {0}".format(config))
+        loopForever()
+    except (KeyboardInterrupt, IOError, SystemExit):
+        print("lgTask.Processor - Finishing tasks and shutting down")
+
+    proc.stop()
+

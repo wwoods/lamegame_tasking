@@ -17,17 +17,20 @@ if __name__ == '__main__':
           author_email='woodswalben@gmail.com',
           url='http://www.lamegameproductions.com',
           license='MIT',
-          packages=find_packages(exclude=['test', 'test_integration']),
-          include_package_data=False,
+          packages=find_packages(exclude=[ '*.test', '*.test.*' ]),
           package_data = {
               # Resources to include, e.g.: '': ['static/*','templates/*']
           },
+          data_files = [
+              # Loose files to distribute with install
+              # List of tuples of (destFolder, [ local_files ])
+              ('bin', [ 'bin/lgTaskProcessor' ])
+          ],
           zip_safe=False,
           install_requires=[
               # -*- Extra requirements: -*-
           ],
           entry_points="""
           # -*- Entry points: -*-
-          """,
-          test_suite='test_integration'
+          """
           )
