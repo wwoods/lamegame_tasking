@@ -53,14 +53,35 @@ Creating a single-scheduled task to run:
 
 
 
-Create a recurring scheduled task:
+Create a recurring scheduled task (remember, not specifying taskName as a kwarg
+will default to the class name for the task):
 >> import lgTask
 >> c = lgTask.Connection()
->> c.scheduledTask("MyAppTask", interval="1 day/hour/minute/second"[, runAt=[datetime object OR "1 day/hour/minute/second"])
+>> c.scheduleTask("MyAppTask", interval="1 day/hour/minute/second"[, runAt=[datetime object OR "1 day/hour/minute/second"])
 
 The runAt parameter may be used to defer the task's interval start time from 
 NOW until the specified time (think of it as startAt; named runAt for 
 consistency).
+
+If a scheduled task with the same name already exists, this will raise an
+exception rather than rewriting that task's schedule / kwargs.
+
+
+
+Create a single-scheduled task to run ONLY IF it isn't already scheduled:
+>> c.scheduleTask("MyAppTask", runAt='1 hour')
+
+If the task was already scheduled (and not executed yet), this function does 
+nothing; that task is presumed to cover whatever this newly requested task
+is supposed to accomplish.  Be careful with that.  But this is mostly for
+batching things when batches are gradually built in the db.
+
+
+
+Unscheduling a scheduled task:
+>> c.unscheduleTask("MyAppTask")
+
+Does not raise an exception if the task does not exist.
 
 
 

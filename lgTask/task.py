@@ -15,8 +15,7 @@ class Task(object):
         """
 
     def __init__(self, taskConnection, taskId=None, **kwargs):
-        """taskId is not required, but will raise an error on any logging
-        function.  Used by Processor.
+        """taskId is not required, but that should only be used by Processor.
         """
         self.stopRequested = False
         self.taskConnection = taskConnection

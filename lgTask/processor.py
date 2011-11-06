@@ -42,6 +42,9 @@ class Processor(SingletonTask):
         self._initTasksAvailable(self.config['lgTaskProcessor']['taskDir'])
         self._tasks = []
         
+    def log(self, message):
+        print(message)
+        
     def run(self):
         """Run until our stop() is called"""
         while not self.stopRequested:
@@ -89,6 +92,10 @@ class Processor(SingletonTask):
             
             # The task is done
             self._tasks.remove(t)
+            self.log("Finished task {0}: {1}".format(
+                getattr(t, 'taskName', t.__class__.__name__)
+                , t._logs[-1]
+            ))
                 
         
     def _consume(self):
