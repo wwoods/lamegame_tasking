@@ -13,6 +13,8 @@ class Processor(SingletonTask):
     """
 
     HEARTBEAT_INTERVAL = TimeInterval('0.5 seconds')
+    MAX_TASKS = 1
+    MAX_TASKS__doc = """Python processes are inherently single-threaded because of the GIL.  MAX_TASKS only ever makes sense being 1, but is placed into a variable for this documentation."""
     
     def __init__(self, config, taskName=None):
         """Creates a new task processor.
@@ -54,9 +56,9 @@ class Processor(SingletonTask):
         """Run until our stop() is called"""
         while not self.stopRequested:
             self._checkTasks()
-            self._consume()
-            import time
-            time.sleep(0.1)
+            if not self._consume():
+                import time
+                time.sleep(0.1)
         
         if self.stopRequested == 'onConsume':
             # This is only ever used for debugging, but finish out all
@@ -109,6 +111,11 @@ class Processor(SingletonTask):
         
         Returns True if a task is started.  False otherwise.
         """
+
+        if len(self._tasks) >= self.MAX_TASKS:
+            # We are already running our max count.  Do not accept new work.
+            return False
+
         c = self.taskConnection
         try:
             task = c.startTask(self._tasksAvailable)

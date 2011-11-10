@@ -118,7 +118,8 @@ taskDir = '/home/user/myAppTasks'
 
 3. Setup cron to run lgTaskProcessor every minute (to prevent it from erroring out; a processor will automatically not run two instances) with the following parameters:
   a. Config file - absolute path to task processor configuration
-  b. [optional] Processor name - if unspecified, the config or host name is 
-      used.
-  z. Example: lgTaskProcessor /home/user/myAppProcessor.cfg [processor1]
+  b. [optional] Number of processors to spawn - if unspecified, spawn 1.
+  z. Example: lgTaskProcessor /home/user/myAppProcessor.cfg 2
+
+Each Processor runs one task at a time.  They are named according to the format "hostname-index", with index starting at 1.  If only one processor is spawned b y the lgTaskProcessor dscript, the "-index" portion of the name is dropped.
 
