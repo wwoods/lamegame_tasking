@@ -37,7 +37,7 @@ class Processor(SingletonTask):
         else:
             raise ValueError("Unrecognized config type")
         
-        taskName = taskName or self.config.get('taskName') 
+        taskName = taskName or self.config['lgTaskProcessor'].get('taskName') 
         taskName = taskName or socket.gethostname()
         
         connection = Connection(self.config['lgTaskProcessor']['taskDatabase'])

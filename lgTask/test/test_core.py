@@ -121,3 +121,8 @@ class TestCore(TestCase):
         p2.start()
         p2.stop()
 
+    def test_processorConfigTaskName(self):
+        self.conf['lgTaskProcessor']['taskName'] = 'test'
+        p = lgTask.Processor(self.conf)
+        self.assertEqual('test', p.taskName)
+
