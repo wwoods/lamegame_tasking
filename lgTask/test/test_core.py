@@ -148,3 +148,11 @@ class TestCore(TestCase):
         d = db.find_one({ 'id': 'a' })
         self.assertEqual(8, d['value'])
 
+        # Now test with 2
+        p.MAX_TASKS = 2
+        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+        time.sleep(0.6)
+        d = db.find_one({ 'id': 'a' })
+        self.assertEqual(10, d['value'])
+
