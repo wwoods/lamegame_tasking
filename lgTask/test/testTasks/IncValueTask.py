@@ -2,7 +2,11 @@
 import lgTask
 
 class IncValueTask(lgTask.Task):
-    def run(self, db, id):
+    def run(self, db, id, delay=0):
+        if delay:
+            import time
+            time.sleep(delay)
+
         old = db.find_one({ 'id': id })['value']
         self.log("Old: {0}".format(old))
         db.update({ 'id': id }, { '$inc': { 'value': 1 }})

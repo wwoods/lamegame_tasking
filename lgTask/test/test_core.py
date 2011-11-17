@@ -78,7 +78,7 @@ class TestCore(TestCase):
             p2.start()
             p2.stop()
             self.fail("Two singletons were running under same name.")
-        except lgTask.errors.SingletonAlreadyRunning:
+        except lgTask.errors.SingletonAlreadyRunningError:
             pass
         finally:
             p.stop()
@@ -94,8 +94,8 @@ class TestCore(TestCase):
             try:
                 p2.start()
                 p2.stop()
-                self.fail("Should have raised SingletonAlreadyRunning")
-            except lgTask.errors.SingletonAlreadyRunning:
+                self.fail("Should have raised SingletonAlreadyRunningError")
+            except lgTask.errors.SingletonAlreadyRunningError:
                 pass
         finally:
             p.stop()
@@ -125,4 +125,26 @@ class TestCore(TestCase):
         self.conf['lgTaskProcessor']['taskName'] = 'test'
         p = lgTask.Processor(self.conf)
         self.assertEqual('test', p.taskName)
+
+    def test_processorMaxTasks(self):
+        p = lgTask.Processor(self.conf, taskName="test_processorMaxTasks")
+        p.start()
+
+        db = self.conn._database['test']
+        db.insert({ 'id': 'a', 'value': 6 })
+        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+
+        time.sleep(0.1)
+        d = db.find_one({ 'id': 'a' })
+        self.assertEqual(6, d['value'])
+        time.sleep(0.5)
+        d = db.find_one({ 'id': 'a' })
+        self.assertEqual(7, d['value'])
+        time.sleep(0.2)
+        d = db.find_one({ 'id': 'a' })
+        self.assertEqual(7, d['value'])
+        time.sleep(0.3)
+        d = db.find_one({ 'id': 'a' })
+        self.assertEqual(8, d['value'])
 

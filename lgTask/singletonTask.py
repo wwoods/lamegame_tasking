@@ -83,7 +83,7 @@ class _SingletonHeartbeat(InterruptableThread):
                     self.task.taskName
                     , self.task.lastHeartbeat
                 )
-            except SingletonAlreadyRunning:
+            except SingletonAlreadyRunningError:
                 # Another instance of ourselves is already running; this is
                 # a critical condition and we should definitely signal error
                 # status and try to abort immediately.

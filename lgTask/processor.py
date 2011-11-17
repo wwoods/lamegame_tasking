@@ -3,7 +3,7 @@ import imp
 import inspect
 import socket
 from lgTask import Connection, Task, SingletonTask
-from lgTask.errors import SingletonAlreadyRunning
+from lgTask.errors import SingletonAlreadyRunningError
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
 import os
@@ -58,7 +58,7 @@ class Processor(SingletonTask):
             self._checkTasks()
             if not self._consume():
                 import time
-                time.sleep(0.1)
+                time.sleep(0.01)
         
         if self.stopRequested == 'onConsume':
             # This is only ever used for debugging, but finish out all
@@ -66,7 +66,7 @@ class Processor(SingletonTask):
             while self._consume() or len(self._tasks) != 0:
                 self._checkTasks()
                 import time
-                time.sleep(0.1)
+                time.sleep(0.01)
                 
         
     def stop(self, timeout=None, onNoTasksToConsume=False):
@@ -119,7 +119,7 @@ class Processor(SingletonTask):
         c = self.taskConnection
         try:
             task = c.startTask(self._tasksAvailable)
-        except SingletonAlreadyRunning:
+        except SingletonAlreadyRunningError:
             # We don't really care about this from a processor logging
             # point of view.
             pass

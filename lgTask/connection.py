@@ -98,7 +98,7 @@ class Connection(object):
         
     def singletonAcquire(self, taskName, heartbeat):
         """Acquire the singleton running permissions for taskName or 
-        raise a SingletonAlreadyRunning exception.
+        raise a SingletonAlreadyRunningError exception.
         
         Returns the time that heartbeat is set to when we have acquired the 
 .        lock
@@ -117,10 +117,10 @@ class Connection(object):
                     , safe=True
                 )
             except pymongo.errors.DuplicateKeyError:
-                raise SingletonAlreadyRunning()
+                raise SingletonAlreadyRunningError()
         else:
             if current.get('heartbeat', datetime.min) >= maxHeartbeat:
-                raise SingletonAlreadyRunning()
+                raise SingletonAlreadyRunningError()
             r = c.find_and_modify(
                 {
                     '_id': taskName
@@ -132,14 +132,14 @@ class Connection(object):
                 }
             )
             if r is None:
-                raise SingletonAlreadyRunning()
+                raise SingletonAlreadyRunningError()
             
         # Return our heartbeat
         return now
             
     def singletonHeartbeat(self, taskName, expectedLast):
         """Register a heartbeat for the given singleton.  Raises a 
-        SingletonAlreadyRunning error if the last heartbeat does not match the
+        SingletonAlreadyRunningError error if the last heartbeat does not match the
         expected heartbeat; this indicates that, at some point, another version
         of our singleton was started, and we should abort.
         
@@ -152,7 +152,7 @@ class Connection(object):
             , { '$set': { 'heartbeat': now } }
         )
         if result is None:
-            raise SingletonAlreadyRunning()
+            raise SingletonAlreadyRunningError()
         return now
         
     def singletonRelease(self, taskName, lastHeartbeat):
@@ -210,13 +210,16 @@ class Connection(object):
                 key = str(key)
                 kwargs[key] = value
                 for binding in self.bindingsDecode:
-                    newValue = binding(value)
-                    if newValue is not None:
-                        kwargs[key] = newValue
-                        break
+                    try:
+                        newValue = binding(value)
+                        if newValue is not None:
+                            kwargs[key] = newValue
+                            break
+                    except TypeError:
+                        raise TaskKwargError(key, value)
             task.start(**kwargs)
             return task
-        except SingletonAlreadyRunning:
+        except SingletonAlreadyRunningError:
             # Maybe should just delete the task... 
             self.taskStopped(taskId, True, [ 'SingletonTask already running' ])
             raise
@@ -249,6 +252,9 @@ class Connection(object):
         """Decodes a pymongo connection string into either a Connection or 
         Database object.
         """
+        if not isinstance(connString, basestring):
+            return
+
         m = re.match("^pymongo://([^:@]+(:[^@]+)?@)?([^/]+)(:[^/]+)?(/[^/]+)?(/[^/]+)?$"
                 , connString)
         if m is None:
