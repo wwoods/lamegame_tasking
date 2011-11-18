@@ -1,4 +1,5 @@
 
+import datetime
 import imp
 import inspect
 import socket
@@ -50,7 +51,8 @@ class Processor(SingletonTask):
         self._tasks = []
         
     def log(self, message):
-        print(message)
+        now = datetime.datetime.utcnow()
+        print("[{0}] - {1}".format(now, message))
         
     def run(self):
         """Run until our stop() is called"""
@@ -118,7 +120,7 @@ class Processor(SingletonTask):
 
         c = self.taskConnection
         try:
-            task = c.startTask(self._tasksAvailable)
+            task = c.startTask(self.taskName, self._tasksAvailable)
         except SingletonAlreadyRunningError:
             # We don't really care about this from a processor logging
             # point of view.

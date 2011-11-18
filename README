@@ -20,10 +20,10 @@ class MyAppTask(lgTask.Task):
         # be overridden
         taskDb['collection'].insert({ 'arg': arg })
         self.taskConnection.createTask(
-          "MyAppTask"
-          , taskDb=taskDb
-          , arg=arg + 1
-          )
+            "MyAppTask"
+            , taskDb=taskDb
+            , arg=arg + 1
+            )
 
 
 
@@ -39,6 +39,8 @@ make scheduling or creating the task extract the database name and initialize
 
 
 
+=== Event-Drive Tasks ===
+
 Creating a sample task to run:
 >> import lgTask
 >> c = lgTask.Connection()
@@ -46,44 +48,46 @@ Creating a sample task to run:
 
 
 
-Creating a single-scheduled task to run:
+Creating a task to run at some point in the future:
 >> import lgTask
 >> c = lgTask.Connection()
->> c.createTask("MyAppTask", runAt=[datetime object OR "1 day/hour/minute/second"], arg="Delayed!")
+>> c.delayedTask(datetime object OR "1 day/hour/minute/second"
+    , "MyAppTask", arg="Delayed!")
 
 
 
-Create a recurring scheduled task (remember, not specifying taskName as a kwarg
-will default to the class name for the task):
+=== Scheduled and batched tasks ===
+
+Creating a batched task (if already scheduled, don't schedule again; otherwise
+schedule the task):
 >> import lgTask
 >> c = lgTask.Connection()
->> c.scheduleTask("MyAppTask", interval="1 day/hour/minute/second"[, runAt=[datetime object OR "1 day/hour/minute/second"])
-
-The runAt parameter may be used to defer the task's interval start time from 
-NOW until the specified time (think of it as startAt; named runAt for 
-consistency).
-
-If a scheduled task with the same name already exists, this will raise an
-exception rather than rewriting that task's schedule / kwargs.
+>> c.batchTask(datetime object OR "1 day/hour/minute/second", "MyAppTask")
 
 
 
-Create a single-scheduled task to run ONLY IF it isn't already scheduled:
->> c.scheduleTask("MyAppTask", runAt='1 hour')
+Creating a recurring scheduled task:
+>> import lgTask
+>> c = lgTask.Connection()
+>> c.intervalTask(datetime object OR "1 day/hour/minute/second", "MyAppTask")
 
-If the task was already scheduled (and not executed yet), this function does 
+
+
+Unscheduling a scheduled task (does not raise exception if the task does
+not exist):
+>> c.unscheduleTask("MyAppTask"[, taskName="name"])
+
+If an intervalTask is scheduled with a name that already exists, this will 
+raise an exception rather than rewriting that task's schedule / kwargs.
+
+If the task was already scheduled (and not executed yet), these functions do 
 nothing; that task is presumed to cover whatever this newly requested task
 is supposed to accomplish.  Be careful with that.  But this is mostly for
 batching things when batches are gradually built in the db.
 
 
 
-Unscheduling a scheduled task:
->> c.unscheduleTask("MyAppTask")
-
-Does not raise an exception if the task does not exist.
-
-
+=== Task Processors ===
 
 Configuring and running processors for development:
 At the beginning of your app's web server / task generator:

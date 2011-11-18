@@ -43,6 +43,15 @@ class Connection(object):
     TASK_COLLECTION = "task"
     SCHEDULE_COLLECTION = "schedule"
     SINGLETON_COLLECTION = "taskSingle"
+
+    class states(object):
+        """Various states and collections of states."""
+        REQUEST = 'request'
+        WORKING = 'working'
+        SUCCESS = 'success'
+        ERROR = 'error'
+        NOT_STARTED_GROUP = [ 'request' ]
+        DONE_GROUP = [ 'success', 'error' ]
     
     bindingsEncode = [ _encodePyMongo ]
     bindingsDecode = [ _decodePyMongo ]
@@ -54,43 +63,97 @@ class Connection(object):
             self._initPyMongo(connString)
         else:
             raise ValueError("Unrecognized connString: {0}".format(connString))
+
+
+    def batchTask(self, runAt, taskClass, **kwargs):
+        """Runs a task after a period of time; does not re-add this task
+        if a task already exists.  Uses the taskName kwarg to distinguish
+        batches.
+
+        If the task is already scheduled and runAt comes before it was 
+        previously scheduled to run, its schedule will be moved up to
+        the new runAt time.
+
+        Batched tasks have all of the properties of singleton tasks; the 
+        difference is that batched tasks must run inside the task processing
+        framework, and not as independent entities.
+
+        Raises TaskKwargError if a scheduled batch task already exists, but
+        the kwargs are different.
+        """
+
+        now = datetime.utcnow()
+        runAt = self._getRunAtTime(now, runAt)
+        kwargs = self._kwargsEncode(kwargs)
+
+        taskName = self._getTaskName(taskClass, kwargs)
+        taskColl = self._database[self.TASK_COLLECTION]
+
+        existing = taskColl.find_one(
+            { '_id': taskName }
+            , { 'batchQueued': 1, 'kwargs': 1, 'state': 1, 'tsRequest': 1 }
+        )
+
+        if existing:
+            # Double check kwarg match or we have another problem
+            if kwargs != existing['kwargs']:
+                raise TaskKwargError("Didn't match existing scheduled batch")
+
+        if existing and existing['state'] in self.states.NOT_STARTED_GROUP:
+            # Already an existing task; update the request time if we need to
+            oldRunAt = existing['tsRequest']
+            if runAt < oldRunAt:
+                # Even if this fails, the task will still run at a point after
+                # when we were requested, so we take don't need to do
+                # safe=True
+                taskColl.update(
+                    { '_id': taskName, 'tsRequest': oldRunAt }
+                    , { '$set': { 'tsRequest': runAt } }
+                )
+        elif existing and runAt < (existing.get('batchQueued') or datetime.max):
+            # Already an existing task, but it's running; tell it to 
+            # reschedule when finished.
+            print("SETTING batchQueued TO " + str(runAt))
+            r = taskColl.find_and_modify(
+                { '_id': taskName }
+                , { '$set': { 'batchQueued': runAt } }
+            )
+
+            if r is None:
+                # We want to add the task; couldn't set queuing flag
+                print ("SETTING failed, adding new")
+                existing = False
+
+        if not existing:
+            # Not existing or failed to queue; insert
+            taskArgs = { 
+                '_id': taskName
+                , 'tsRequest': runAt 
+                , 'batch': True
+            }
+            self._createTask(now, taskClass, taskArgs, kwargs)
+
         
-    def createTask(self, taskClass, runAt=None, **kwargs):
-        kwargsEncoded = {}
-        for key,value in kwargs.items():
-            newValue = value
-            for binding in self.bindingsEncode:
-                decodedValue = binding(value)
-                if decodedValue is not None:
-                    newValue = decodedValue
-                    break
-            kwargsEncoded[key] = newValue
+    def createTask(self, taskClass, **kwargs):
+        """Creates a task to be executed immediately.
+        """
+        now = datetime.utcnow()
+        kwargs = self._kwargsEncode(kwargs)
+        self._createTask(now, taskClass, {}, kwargs)
+
+    def delayedTask(self, runAt, taskClass, **kwargs):
+        """Creates a task that runs after a given period of time, or at 
+        a specific UTC datetime.
+        """
+
+        now = datetime.utcnow()
+        runAt = self._getRunAtTime(now, runAt)
 
         taskArgs = {
-            'tsStart': None
-            ,'tsStop': None
-            ,'state': 'request'
-            ,'taskClass': taskClass
-            ,'kwargs': kwargsEncoded
+          'tsRequest': runAt
         }
-        now = datetime.utcnow()
-        taskArgs['tsSchedule'] = now
-        if runAt is None:
-            taskArgs['tsRequest'] = now
-        else:
-            if isinstance(runAt, datetime):
-                pass
-            elif isinstance(runAt, timedelta):
-                runAt = now + runAt
-            elif isinstance(runAt, basestring):
-                runAt = now + TimeInterval(runAt)
-            else:
-                raise ValueError("runAt must be datetime, timedelta, or str")
-            
-            taskArgs['tsRequest'] = runAt
-            
-        taskColl = self._database[self.TASK_COLLECTION]
-        taskColl.insert(taskArgs)
+        kwargs = self._kwargsEncode(kwargs)
+        self._createTask(now, taskClass, taskArgs, kwargs)
         
     def ensureIndexes(self):
         """Assert that all necessary indexes exist in the tasks collections 
@@ -182,13 +245,15 @@ class Connection(object):
             , { '$unset': { 'heartbeat': 1 } }
         )
         
-    def startTask(self, availableTasks):
+    def startTask(self, processorName, availableTasks):
         """Gets a task from our database and calls its start() method.
         
         Returns either the new Task object or None if no suitable task was
         found.  
         
         Exceptions are forwarded to the caller.
+
+        processorName -- String - The full name of the processor.
         
         availableTasks: a dict of (ClassName, ClassObj) pairs that determines
             what tasks may be started by this slave.
@@ -204,6 +269,7 @@ class Connection(object):
             , { '$set': {
                 'state': 'working'
                 , 'tsStart': now
+                , 'processor': processorName
             }}
             , new = True
         )
@@ -213,10 +279,13 @@ class Connection(object):
         
         taskId = taskData['_id']
         try:
-            taskName = taskData['kwargs'].get('taskName', None)
+            # This isn't the full task name; we let the task class handle
+            # adding the class prefix.
+            taskNameSuffix = taskData['kwargs'].get('taskName', None)
             task = availableTasks[taskData['taskClass']](
                     taskConnection=self
-                    ,taskName=taskName
+                    ,taskName=taskNameSuffix
+                    ,taskData=taskData
                     ,taskId=taskId
                 )
             # Since py2.X requires kwargs keys to be str types and not unicode,
@@ -246,26 +315,110 @@ class Connection(object):
             self.taskStopped(taskId, False, [ 'Error starting task: ' + str(e) ])
             raise
         
-    def taskStopped(self, taskId, success, logs):
+    def taskStopped(self, taskOrId, success, logs):
         """Update the database noting that a task has stopped.  Must be callable
         multiple times; see Task._finished.
         
-        taskId - the id of the task
+        taskOrId - the task or ID being stopped
         
         success - True for success, False for error
         
         logs - array of log entries.
         """
         c = self._database[self.TASK_COLLECTION]
+        if not isinstance(taskOrId, basestring):
+            task = taskOrId
+            taskId = task.taskId
+        else:
+            task = None
+            taskId = taskOrId
+
         now = datetime.utcnow()
-        c.update(
-            { '_id': taskId }
-            , { '$set': {
-                'state': 'success' if success else 'error'
-                , 'tsStop': now
-                , 'lastLog': logs[-1] if len(logs) > 0 else '(No log entries)'
-            }} 
-        )
+        finishUpdates = {
+            'state': 'success' if success else 'error'
+            , 'tsStop': now
+            , 'lastLog': logs[-1] if len(logs) > 0 \
+                else '(No log entries)'
+        }
+
+        if \
+            task is not None \
+            and (
+                task.taskData.get('batch') \
+                or task.taskData.get('interval')
+            ):
+            # We need to change the identifier to make way for a new 
+            # batch or interval task.  This isa destructive and we want it
+            # to succeed always, so we set it up in a try loop to deal with 
+            # StopTaskError
+            taskData = [ None ]
+            reinserted = [ False ]
+            queueChecked = [ False ]
+            def tryFixTask():
+                if taskData[0] is None:
+                    taskData[0] = c.find_and_modify(
+                        { '_id': taskId }
+                        , remove=True
+                    )
+                if not reinserted[0]:
+                    try:
+                        del taskData[0]['_id']
+                    except KeyError:
+                        pass
+                    taskData[0].update(finishUpdates)
+                    reinserted[0] = c.insert(taskData[0], safe=True)
+                if not queueChecked[0] and taskData[0].get('batchQueued'):
+                    print("BATCH QUEUE at {0}; now is {1}".format(
+                        taskData[0]['batchQueued']
+                        , datetime.utcnow()
+                    ))
+                    taskArgs = { 
+                        '_id': taskId
+                        , 'batch': True 
+                        , 'tsRequest': taskData[0]['batchQueued']
+                    }
+                    # Even if this gets run twice, it's fine since we 
+                    # have a specific ID; only one task will be created.
+                    self._createTask(now, taskData[0]['taskClass'], taskArgs
+                        , task._kwargsOriginal
+                    )
+                    queueChecked[0] = True
+
+
+            # A while loop would necessarily leave gaps in the try..except
+            # block.  So for 100% coverage, we do it like this.
+            try:
+                try:
+                    tryFixTask()
+                except:
+                    tryFixTask()
+            except:
+                tryFixTask()
+        else:
+            #Standard set-as-finished update; safe to be called repeatedly.
+            c.update(
+                { '_id': taskId }
+                , { '$set': finishUpdates }
+            )
+
+    def _createTask(self, utcNow, taskClass, taskArgs, kwargsEncoded):
+        """Creates a new task entry with some basic default task args that
+        are updated with taskArgs, and kwargs.
+        """
+        taskDefaultArgs = {
+            'tsInsert': utcNow
+            ,'tsRequest': utcNow
+            ,'tsStart': None
+            ,'tsStop': None
+            ,'state': 'request'
+            ,'taskClass': taskClass
+            ,'kwargs': kwargsEncoded
+        }
+
+        taskDefaultArgs.update(taskArgs)
+            
+        taskColl = self._database[self.TASK_COLLECTION]
+        taskColl.insert(taskDefaultArgs)
                 
     @classmethod
     def _decodePyMongo(cls, connString):
@@ -294,7 +447,33 @@ class Connection(object):
                 c = c[coll]
                 
         return c
-            
+
+    def _getRunAtTime(self, utcNow, runAt):
+        """Changes a runAt variable that might be an interval or datetime,
+        and returns a utc datetime.
+        """
+        now = utcNow
+        if isinstance(runAt, datetime):
+            pass #Leave as a datetime
+        elif isinstance(runAt, timedelta):
+            runAt = now + runAt
+        elif isinstance(runAt, basestring):
+            runAt = now + TimeInterval(runAt)
+        else:
+            raise ValueError("runAt must be datetime, timedelta, or str")
+
+        return runAt
+
+    def _getTaskName(self, taskClass, kwargs):
+        """Gets the fully qualified task name for a given task class and 
+        kwargs.
+        """
+        className = taskClass
+        suffix = kwargs.get('taskName', None)
+        if suffix:
+            className += suffix
+        return className
+
     def _initPyMongo(self, connString):
         """Open up a connection to the given pymongo resource.
         
@@ -314,3 +493,17 @@ class Connection(object):
         self._connection = db.connection
         self._database = db
 
+    def _kwargsEncode(self, kwargs):
+        """Encode kwargs from python objects to database objects
+        """
+        kwargsEncoded = {}
+        for key,value in kwargs.items():
+            newValue = value
+            for binding in self.bindingsEncode:
+                decodedValue = binding(value)
+                if decodedValue is not None:
+                    newValue = decodedValue
+                    break
+            kwargsEncoded[key] = newValue
+        return kwargsEncoded
+            

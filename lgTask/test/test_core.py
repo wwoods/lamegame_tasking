@@ -7,6 +7,7 @@ import time
 from unittest import TestCase
 
 import lgTask
+from lgTask.errors import *
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
 
@@ -21,6 +22,92 @@ class TestCore(TestCase):
         self.conn._database.drop_collection(self.conn.TASK_COLLECTION)
         self.conn._database.drop_collection(self.conn.SINGLETON_COLLECTION)
         self.conn._database.drop_collection(self.conn.SCHEDULE_COLLECTION)
+
+    def test_batch(self):
+        p = lgTask.Processor(self.conf)
+        p.start()
+        try:
+            db = self.conn._database['test']
+            db.insert({ 'id': 'c', 'value': 1 })
+            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
+            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
+            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
+            time.sleep(0.2)
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(2, d['value'])
+            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
+            time.sleep(0.2)
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(3, d['value'])
+            # Test queueing
+            # 0 - delay 0.05 inc value
+            # 0.1 - IV1 is in delay but running, IV2 is batch queued
+            # 0.2 - IV1 should still be in delay
+            # 0.3 - IV1 changed value and exits
+            # 0.4 - IV2 should still be in batch delay
+            # 0.5 - IV2 should start running
+            # 0.6 - IV2 should be in task delay
+            # 0.7 - IV2 should finish task delay
+            self.conn.batchTask('0.05 seconds', 'IncValueTask', db=db, id='c'
+                , delay=0.2
+            )
+            time.sleep(0.1) #0.1
+            self.conn.batchTask('0.4 seconds', 'IncValueTask', db=db, id='c'
+                , delay=0.2 # We don't want a delay, but want same kwargs
+            )
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(3, d['value'])
+            time.sleep(0.1) #0.2
+            # Shouldn't have changed, if we respected batch delay
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(3, d['value'])
+            time.sleep(0.1) #0.3
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(4, d['value'])
+            time.sleep(0.1) #0.4
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(4, d['value'])
+            time.sleep(0.2) #0.6
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(4, d['value'])
+            time.sleep(0.2) #0.8
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(5, d['value'])
+        finally:
+            p.stop()
+
+    def test_batchKwargs(self):
+        # See if scheduling two batches with the same name but different
+        # kwargs raises a TaskKwargError
+        self.conn.batchTask('1 second', 'IncValueTask', id='a')
+        try:
+            self.conn.batchTask('1 second', 'IncValueTask', id='b')
+            self.fail("Different kwargs did not raise TaskKwargError")
+        except TaskKwargError:
+            pass
+    
+            time.sleep(0.2)
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(4, d['value'])
+            time.sleep(0.1) 
+            # Shouldn't have changed, if we respected batch delay
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(4, d['value'])
+            time.sleep(0.2)
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(5, d['value'])
+        finally:
+            p.stop()
+
+    def test_batchKwargs(self):
+        # See if scheduling two batches with the same name but different
+        # kwargs raises a TaskKwargError
+        self.conn.batchTask('1 second', 'IncValueTask', id='a')
+        try:
+            self.conn.batchTask('1 second', 'IncValueTask', id='b')
+            self.fail("Different kwargs did not raise TaskKwargError")
+        except TaskKwargError:
+            pass
     
     def test_consumeOne(self):
         db = self.conn._database['test']
@@ -55,8 +142,10 @@ class TestCore(TestCase):
         p = lgTask.Processor(self.conf, taskName='test_consumeDelayed')
         p.start()
         try:
-            self.conn.createTask("IncValueTask", runAt=TimeInterval('1 second')
-                , db=db, id='a')
+            self.conn.delayedTask(
+                '1 second', "IncValueTask"
+                , db=db, id='a'
+            )
             time.sleep(0.5)
             doc = db.find_one({ 'id': 'a' })
             self.assertEqual(6, doc['value'])
@@ -146,7 +235,7 @@ class TestCore(TestCase):
     def test_processorConfigTaskName(self):
         self.conf['lgTaskProcessor']['taskName'] = 'test'
         p = lgTask.Processor(self.conf)
-        self.assertEqual('test', p.taskName)
+        self.assertEqual('Processor-test', p.taskName)
 
     def test_processorMaxTasks(self):
         p = lgTask.Processor(self.conf, taskName="test_processorMaxTasks")

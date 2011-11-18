@@ -16,20 +16,26 @@ class Task(object):
         """Raised in thread running task when stop() is called and times out.
         """
 
-    def __init__(self, taskConnection, taskId=None, **kwargs):
+    def __init__(self, taskConnection, taskId=None, taskData={}, **kwargs):
         """taskId is not required, but that should only be used by Processor.
         """
         self.stopRequested = False
         self.taskConnection = taskConnection
+        self.taskData = taskData
         self.taskId = taskId
         self._thread = None
         self._logs = []
+
+        self.taskName = self.__class__.__name__
+        taskName = kwargs.get('taskName', None)
+        if taskName:
+            self.taskName += '-' + taskName
         
     def __str__(self):
         type = self.__class__.__name__
         if hasattr(self, taskName):
-            type += "({0})".format(taskName)
-        return type
+            type += "-{0}".format(taskName)
+        return "Task<{0}>".format(type)
         
     def error(self, message=''):
         if message:
@@ -78,7 +84,7 @@ class Task(object):
         """Called when the task finishes; must be callable multiple times,
         since StopTaskError can be raised in the middle of it.
         """
-        self.taskConnection.taskStopped(self.taskId, success, self._logs)
+        self.taskConnection.taskStopped(self, success, self._logs)
         
         
         

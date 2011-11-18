@@ -23,10 +23,12 @@ class SingletonTask(Task):
         taskConnection -- lgTask.Connection - The connection for tasking.
         
         taskName -- String or None - The name of the singleton; this is what is
-            used to enforce uniqueness.
+            used to enforce uniqueness (when combined with class)
         """
-        self.taskName = taskName or self.__class__.__name__
-        Task.__init__(self, taskConnection=taskConnection, taskId=taskId)
+        Task.__init__(
+            self, taskConnection=taskConnection, taskId=taskId
+            , taskName=taskName
+        )
         
     def start(self, **kwargs):
         """Override Task.start() to assert singleton status first, and start
