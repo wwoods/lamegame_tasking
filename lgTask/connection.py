@@ -56,21 +56,25 @@ class Connection(object):
             raise ValueError("Unrecognized connString: {0}".format(connString))
         
     def createTask(self, taskClass, runAt=None, **kwargs):
+        kwargsEncoded = {}
         for key,value in kwargs.items():
+            newValue = value
             for binding in self.bindingsEncode:
-                newValue = binding(value)
-                if newValue is not None:
-                    kwargs[key] = newValue
+                decodedValue = binding(value)
+                if decodedValue is not None:
+                    newValue = decodedValue
                     break
+            kwargsEncoded[key] = newValue
 
         taskArgs = {
             'tsStart': None
             ,'tsStop': None
             ,'state': 'request'
             ,'taskClass': taskClass
-            ,'kwargs': kwargs 
+            ,'kwargs': kwargsEncoded
         }
         now = datetime.utcnow()
+        taskArgs['tsSchedule'] = now
         if runAt is None:
             taskArgs['tsRequest'] = now
         else:
@@ -83,7 +87,6 @@ class Connection(object):
             else:
                 raise ValueError("runAt must be datetime, timedelta, or str")
             
-            taskArgs['tsSchedule'] = now
             taskArgs['tsRequest'] = runAt
             
         taskColl = self._database[self.TASK_COLLECTION]
@@ -96,13 +99,18 @@ class Connection(object):
         db = self._database[self.TASK_COLLECTION]
         db.ensure_index( [ ('state', 1), ( 'taskClass', 1), ( 'tsRequest', -1 ) ] )
         
-    def singletonAcquire(self, taskName, heartbeat):
+    def singletonAcquire(self, singleton):
         """Acquire the singleton running permissions for taskName or 
         raise a SingletonAlreadyRunningError exception.
         
         Returns the time that heartbeat is set to when we have acquired the 
-.        lock
+        lock
         """
+        taskName = singleton.taskName
+        # getattr instead of direct; if this singleton is not spawned through
+        # a processor, it will not have _kwargsOriginal.
+        taskKwargs = getattr(singleton, '_kwargsOriginal', {})
+        heartbeat = singleton.HEARTBEAT_INTERVAL
         c = self._database[self.SINGLETON_COLLECTION]
         # Check if already running, cautious upsert if not.
         now = datetime.utcnow()
@@ -113,13 +121,19 @@ class Connection(object):
             # record.
             try: 
                 c.insert(
-                    { '_id': taskName, 'heartbeat': now }
+                    { '_id': taskName, 'heartbeat': now, 'kwargs': taskKwargs }
                     , safe=True
                 )
             except pymongo.errors.DuplicateKeyError:
                 raise SingletonAlreadyRunningError()
         else:
             if current.get('heartbeat', datetime.min) >= maxHeartbeat:
+                # Already running; a SingletonAlreadyRunningError should be
+                # raised, but for added debugging support, we'll make sure
+                # that our kwargs match theirs
+                ck = current['kwargs']
+                if ck != taskKwargs:
+                    raise TaskKwargError("{0} != {1}".format(ck, taskKwargs))
                 raise SingletonAlreadyRunningError()
             r = c.find_and_modify(
                 {
@@ -152,6 +166,8 @@ class Connection(object):
             , { '$set': { 'heartbeat': now } }
         )
         if result is None:
+            # NOTE - In tests, this can also happen when you forget to stop()
+            # a processor!
             raise SingletonAlreadyRunningError()
         return now
         
@@ -197,7 +213,7 @@ class Connection(object):
         
         taskId = taskData['_id']
         try:
-            taskName = taskData['kwargs'].pop('taskName', None)
+            taskName = taskData['kwargs'].get('taskName', None)
             task = availableTasks[taskData['taskClass']](
                     taskConnection=self
                     ,taskName=taskName
@@ -205,18 +221,21 @@ class Connection(object):
                 )
             # Since py2.X requires kwargs keys to be str types and not unicode,
             # we have to convert kwargs
+            kwargsOriginal = taskData['kwargs']
+            task._kwargsOriginal = kwargsOriginal
             kwargs = {}
-            for key,value in taskData['kwargs'].items():
+            for key,value in kwargsOriginal.items():
                 key = str(key)
+                if key == 'taskName':
+                    # Never put taskName into the decoded kwargs
+                    continue
                 kwargs[key] = value
                 for binding in self.bindingsDecode:
-                    try:
-                        newValue = binding(value)
-                        if newValue is not None:
-                            kwargs[key] = newValue
-                            break
-                    except TypeError:
-                        raise TaskKwargError(key, value)
+                    newValue = binding(value)
+                    if newValue is not None:
+                        kwargs[key] = newValue
+                        break
+            task.kwargs = kwargs
             task.start(**kwargs)
             return task
         except SingletonAlreadyRunningError:
@@ -228,7 +247,8 @@ class Connection(object):
             raise
         
     def taskStopped(self, taskId, success, logs):
-        """Update the database noting that a task has stopped.
+        """Update the database noting that a task has stopped.  Must be callable
+        multiple times; see Task._finished.
         
         taskId - the id of the task
         
@@ -293,3 +313,4 @@ class Connection(object):
     def _initPyMongoDb(self, db):
         self._connection = db.connection
         self._database = db
+

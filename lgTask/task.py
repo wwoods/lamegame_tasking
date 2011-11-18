@@ -1,6 +1,7 @@
 
 import ctypes
 import inspect
+from lgTask.errors import *
 from lgTask.lib.compat import cherrypy_subscribe
 from lgTask.lib.interruptableThread import InterruptableThread
 import traceback
@@ -72,9 +73,11 @@ class Task(object):
         self._thread.join(timeout)
         if self._thread.is_alive():
             self._thread.raiseException(self.StopTaskError)
-            self._thread.join(2.0)
             
     def _finished(self, success):
+        """Called when the task finishes; must be callable multiple times,
+        since StopTaskError can be raised in the middle of it.
+        """
         self.taskConnection.taskStopped(self.taskId, success, self._logs)
         
         
@@ -90,10 +93,16 @@ class _TaskThread(InterruptableThread):
     def run(self):
         success = True
         try:
-            self.task.run(**self.kwargs)
-        except Exception:
-            success = False
-            self.task.error()
-        finally:
+            try:
+                self.task.run(**self.kwargs)
+            except Exception:
+                success = False
+                self.task.error()
+            finally:
+                self.task._finished(success)
+        except self.task.StopTaskError:
+            # We've been interrupted; if we were interrupted in run(), the
+            # Exception block above would have caught it.  So we must
+            # have been interrupted in _finished.
             self.task._finished(success)
             

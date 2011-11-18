@@ -7,8 +7,6 @@ class SingletonAlreadyRunningError(Exception):
     pass
 
 class TaskKwargError(Exception):
-    """The task was passed an invalid parameter."""
-    def __init__(self, param, value):
-        Exception.__init__(
-            self, "TaskKwargError: {0} ({1})".format(param, value))
+    """The task was passed an invalid parameter, or different kwargs from
+    the running singleton."""
 

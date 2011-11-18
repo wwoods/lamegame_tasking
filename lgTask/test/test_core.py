@@ -82,6 +82,28 @@ class TestCore(TestCase):
             pass
         finally:
             p.stop()
+
+    def test_singletonDiffKwargs(self):
+        # Assert that a singleton trying to start during the run of the 
+        # same singleton raises TaskKwargError rather than 
+        # SingletonAlreadyRunningError (for added visibility at system 
+        # instabilities; that is, we don't want to throw away data)
+        p = lgTask.Processor(self.conf, taskName="test_singletonDiffKwargs")
+        p2 = lgTask.Processor(self.conf, taskName="test_singletonDiffKwargs")
+        # Emulate different kwargs
+        p2._kwargsOriginal = { 'a': 'b' }
+        p.start()
+        try:
+            p2.start()
+            p2.stop()
+            self.fail("Two singletons with different kwargs did not raise "
+                + "TaskKwargError"
+            )
+        except lgTask.errors.TaskKwargError:
+            pass
+        finally:
+            p.stop()
+
             
     def test_singletonHeartbeat(self):
         p = lgTask.Processor(self.conf, taskName='test_singletonHeartbeat')
@@ -130,29 +152,32 @@ class TestCore(TestCase):
         p = lgTask.Processor(self.conf, taskName="test_processorMaxTasks")
         p.start()
 
-        db = self.conn._database['test']
-        db.insert({ 'id': 'a', 'value': 6 })
-        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
-        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+        try:
+            db = self.conn._database['test']
+            db.insert({ 'id': 'a', 'value': 6 })
+            self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+            self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
 
-        time.sleep(0.1)
-        d = db.find_one({ 'id': 'a' })
-        self.assertEqual(6, d['value'])
-        time.sleep(0.5)
-        d = db.find_one({ 'id': 'a' })
-        self.assertEqual(7, d['value'])
-        time.sleep(0.2)
-        d = db.find_one({ 'id': 'a' })
-        self.assertEqual(7, d['value'])
-        time.sleep(0.3)
-        d = db.find_one({ 'id': 'a' })
-        self.assertEqual(8, d['value'])
+            time.sleep(0.1)
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(6, d['value'])
+            time.sleep(0.5)
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(7, d['value'])
+            time.sleep(0.2)
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(7, d['value'])
+            time.sleep(0.3)
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(8, d['value'])
 
-        # Now test with 2
-        p.MAX_TASKS = 2
-        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
-        self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
-        time.sleep(0.6)
-        d = db.find_one({ 'id': 'a' })
-        self.assertEqual(10, d['value'])
+            # Now test with 2
+            p.MAX_TASKS = 2
+            self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+            self.conn.createTask("IncValueTask", db=db, id='a', delay=0.5)
+            time.sleep(0.6)
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(10, d['value'])
+        finally:
+            p.stop()
 

@@ -32,9 +32,7 @@ class SingletonTask(Task):
         """Override Task.start() to assert singleton status first, and start
         heartbeat.
         """
-        self.lastHeartbeat = self.taskConnection.singletonAcquire(
-            self.taskName, self.HEARTBEAT_INTERVAL
-        )
+        self.lastHeartbeat = self.taskConnection.singletonAcquire(self)
         self._startHeartbeat()
         Task.start(self, **kwargs)
         
@@ -69,36 +67,42 @@ class _SingletonHeartbeat(InterruptableThread):
         InterruptableThread.__init__(self)
         
     def stop(self):
-        self.stopRequested = True
-        self.raiseException(_SingletonHeartbeatInterrupt)
-        self.join()
+        if not self.stopRequested:
+            self.stopRequested = True
+            self.raiseException(_SingletonHeartbeatInterrupt)
+            self.join()
         
     def run(self):
         t = self.task.HEARTBEAT_INTERVAL
         t = t.days * 24 * 60 * 60 + t.seconds + t.microseconds * 1e-6
+        try:
+            self._run(t)
+        except _SingletonHeartbeatInterrupt:
+            # Ok, we just got interrupted; task is probably dying anyway
+            pass
+        except SingletonAlreadyRunningError:
+            # Another instance of ourselves is already running; this is
+            # a critical condition and we should definitely signal error
+            # status and try to abort immediately.
+            # This shouldn't ever really happen, but it's good to be
+            # thorough.
+            self.task.error("Heartbeat update failed; found last timestamp "
+                + "not equal to expected")
+            self.task.stop(timeout=0)
+        except:
+            # The likely exception here is that we could not write a 
+            # heartbeat value.  This means that we can no longer enforce
+            # our singleton status, and it is probably better to abort
+            # if possible.
+            self.task.error("Heartbeat update failed")
+            self.task.stop(timeout=0)
+
+    def _run(self, t):
         while not self.stopRequested:
-            try:
-                time.sleep(t)
-                self.task.lastHeartbeat = self.task.taskConnection.singletonHeartbeat(
+            time.sleep(t)
+            self.task.lastHeartbeat = \
+                self.task.taskConnection.singletonHeartbeat(
                     self.task.taskName
                     , self.task.lastHeartbeat
                 )
-            except SingletonAlreadyRunningError:
-                # Another instance of ourselves is already running; this is
-                # a critical condition and we should definitely signal error
-                # status and try to abort immediately.
-                # This shouldn't ever really happen, but it's good to be
-                # thorough.
-                self.task.error("Heartbeat update failed; found last timestamp "
-                    + "not equal to expected")
-                self.task.stop(timeout=0)
-            except _SingletonHeartbeatInterrupt:
-                return
-            except:
-                # The likely exception here is that we could not write a 
-                # heartbeat value.  This means that we can no longer enforce
-                # our singleton status, and it is probably better to abort
-                # if possible.
-                self.task.error("Heartbeat update failed")
-                self.task.stop(timeout=0)
 
