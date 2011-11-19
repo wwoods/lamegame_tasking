@@ -157,11 +157,81 @@ class Connection(object):
         
     def ensureIndexes(self):
         """Assert that all necessary indexes exist in the tasks collections 
-        to maintain performance
+        to maintain performance.  Typically called by a Processor.
         """
         db = self._database[self.TASK_COLLECTION]
         db.ensure_index( [ ('state', 1), ( 'taskClass', 1), ( 'tsRequest', -1 ) ] )
-        
+
+    def intervalTask(self, interval, taskClass, fromStart=False, **kwargs):
+        """Schedule (or assert that a schedule exists for) a task to be
+        executed at the given interval.
+
+        Raises a TaskKwargError if there is already a scheduler for this
+        taskClass and taskName.  
+
+        interval -- String or timedelta - The period of time to elapse between
+        the end of one execution and the beginning of the next.  Pass the kwarg
+        fromStart as True to start from the beginning of each execution.
+
+        taskClass -- String - Name of the class to execute.
+
+        fromStart -- Boolean - If set to True, causes this task to be 
+        rescheduled when work starts rather than when work ends.  New intervals
+        will not be allowed to run until a previous interval has finished, 
+        however.  In other words, the fastest an intervalTask will be 
+        scheduled is as fast as it can be executed.
+        """
+
+        now = datetime.utcnow()
+        ti = TimeInterval(interval)
+        # This is tacky, but we are going to integrate a test for TimeInterval
+        # here.  It would be very bad if this conversion ever failed.  This
+        # should be removed at some point, but it doubtlessly takes a very
+        # small amount of time to run.
+        if ti != TimeInterval(str(ti)):
+            raise Exception("TimeInterval identity failed for " + str(interval))
+
+        kwargs = self._kwargsEncode(kwargs)
+        schedule = { 'interval': { 
+            'every': str(ti)
+            , 'fromStart': fromStart 
+        }}
+
+        taskName = self._getTaskName(taskClass, kwargs)
+
+        schedDb = self._database[self.SCHEDULE_COLLECTION]
+        old = schedDb.find_one({ '_id': taskName })
+        if old:
+            if kwargs != old['kwargs'] or schedule != old['schedule']:
+                raise TaskKwargError(
+                    ("Scheduled task with name {0} already "
+                        + "exists."
+                    ).format(taskName)
+                )
+            return
+
+        try:
+            schedDb.insert(
+                { '_id': taskName
+                    , 'kwargs': kwargs
+                    , 'schedule': schedule
+                }
+                , safe=True
+            )
+        except pymongo.errors.DuplicateKeyError:
+            # It was inserted in our midst; run again
+            return self.intervalTask(interval, taskClass, fromStart=fromStart
+                , **kwargs
+            )
+
+        # Create our task, which will perpetually be triggered on our 
+        # schedule.
+        taskArgs = { 
+            '_id': taskName
+            , 'schedule': True
+        }
+        self._createTask(now, taskClass, taskArgs, kwargs)
+
     def singletonAcquire(self, singleton):
         """Acquire the singleton running permissions for taskName or 
         raise a SingletonAlreadyRunningError exception.
@@ -345,7 +415,7 @@ class Connection(object):
             task is not None \
             and (
                 task.taskData.get('batch') \
-                or task.taskData.get('interval')
+                or task.taskData.get('schedule')
             ):
             # We need to change the identifier to make way for a new 
             # batch or interval task.  This isa destructive and we want it
@@ -353,13 +423,12 @@ class Connection(object):
             # StopTaskError
             taskData = [ None ]
             reinserted = [ False ]
+            deletedData = [ None ]
             queueChecked = [ False ]
+            rescheduled = [ False ]
             def tryFixTask():
                 if taskData[0] is None:
-                    taskData[0] = c.find_and_modify(
-                        { '_id': taskId }
-                        , remove=True
-                    )
+                    taskData[0] = c.find_one({ '_id': taskId })
                 if not reinserted[0]:
                     try:
                         del taskData[0]['_id']
@@ -367,22 +436,49 @@ class Connection(object):
                         pass
                     taskData[0].update(finishUpdates)
                     reinserted[0] = c.insert(taskData[0], safe=True)
-                if not queueChecked[0] and taskData[0].get('batchQueued'):
-                    print("BATCH QUEUE at {0}; now is {1}".format(
-                        taskData[0]['batchQueued']
-                        , datetime.utcnow()
-                    ))
+                if not deletedData[0]:
+                    # In case anything (specifically batchQueued) changed
+                    # while we were copying the record, we want to atomically
+                    # re-fetch data.
+                    deletedData[0] = c.find_and_modify(
+                        { '_id': taskId }
+                        , remove=True
+                    )
+                    if deletedData[0] is None:
+                        deletedData[0] = taskData[0]
+                if not queueChecked[0] and deletedData[0].get('batchQueued'):
                     taskArgs = { 
                         '_id': taskId
                         , 'batch': True 
-                        , 'tsRequest': taskData[0]['batchQueued']
+                        , 'tsRequest': deletedData[0]['batchQueued']
                     }
                     # Even if this gets run twice, it's fine since we 
                     # have a specific ID; only one task will be created.
-                    self._createTask(now, taskData[0]['taskClass'], taskArgs
+                    self._createTask(now, deletedData[0]['taskClass'], taskArgs
                         , task._kwargsOriginal
                     )
                     queueChecked[0] = True
+                if not rescheduled[0] and deletedData[0].get('schedule'):
+                    nextTime = self._scheduleGetNextRunTime(
+                        taskId
+                        , deletedData[0]['tsStart']
+                        , now
+                    )
+                    if nextTime is not None:
+                        taskArgs = {
+                            '_id': taskId
+                            , 'schedule': True
+                            , 'tsRequest': nextTime
+                        }
+                        # Same as with batchQueued; OK to run twice since we use
+                        # _id.
+                        self._createTask(
+                            now
+                            , deletedData[0]['taskClass']
+                            , taskArgs
+                            , task._kwargsOriginal
+                        )
+                    rescheduled[0] = True
 
 
             # A while loop would necessarily leave gaps in the try..except
@@ -506,4 +602,34 @@ class Connection(object):
                     break
             kwargsEncoded[key] = newValue
         return kwargsEncoded
+
+    def _scheduleGetNextRunTime(self, scheduleId, taskStart, taskStop):
+        """Given the provided scheduler identifier, task working start time,
+        and task working stop time, produce a datetime representing when
+        the next iteration of this scheduled task should execute.
+
+        taskStop time is always assumed to be == utcnow()
+        """
+        schedDb = self._database[self.SCHEDULE_COLLECTION]
+        schedule = schedDb.find_one({ '_id': scheduleId }, { 'schedule': 1 })
+        if not schedule:
+            return None
+
+        now = taskStop # See assumption in docstring.
+        result = None
+
+        schedule = schedule['schedule']
+        if schedule['interval']:
+            interval = schedule['interval']
+            result = taskStop
+            if interval['fromStart']:
+                result = taskStart
+            result += TimeInterval(interval['every'])
+        else:
+            raise ValueError("No appropriate scheduling method found")
+            
+        if result is not None:
+            if now > result:
+                result = now
+        return result
             

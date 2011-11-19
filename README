@@ -64,26 +64,30 @@ schedule the task):
 >> c = lgTask.Connection()
 >> c.batchTask(datetime object OR "1 day/hour/minute/second", "MyAppTask")
 
+If the task was already scheduled (and not executed yet), these functions do 
+nothing; that task is presumed to cover whatever this newly requested task
+is supposed to accomplish.  Be careful with that.  But this is mostly for
+batching things when batches are gradually built in the db.
 
 
-Creating a recurring scheduled task:
+
+Creating a recurring scheduled task (executed immediately and at given 
+intervals):
 >> import lgTask
 >> c = lgTask.Connection()
 >> c.intervalTask(datetime object OR "1 day/hour/minute/second", "MyAppTask")
+
+If an intervalTask is called with a name that already exists but different 
+kwargs or interval, this will raise an exception of type TaskKwargError rather 
+than rewriting that task's schedule / kwargs.  If called with identical
+arguments to the existing, does nothing.
+
 
 
 
 Unscheduling a scheduled task (does not raise exception if the task does
 not exist):
->> c.unscheduleTask("MyAppTask"[, taskName="name"])
-
-If an intervalTask is scheduled with a name that already exists, this will 
-raise an exception rather than rewriting that task's schedule / kwargs.
-
-If the task was already scheduled (and not executed yet), these functions do 
-nothing; that task is presumed to cover whatever this newly requested task
-is supposed to accomplish.  Be careful with that.  But this is mostly for
-batching things when batches are gradually built in the db.
+>> c.intervalTaskRemove("MyAppTask"[, taskName="name"])
 
 
 

@@ -157,7 +157,109 @@ class TestCore(TestCase):
             self.assertEqual(7, doc['value'])
         finally:
             p.stop()
-        
+
+    def test_intervalTask(self):
+        db = self.conn._database['test']
+        p = lgTask.Processor(self.conf)
+        p.start()
+        try:
+            db.insert({ 'id': 'a', 'value': 0 })
+            self.conn.intervalTask('0.2 seconds', 'IncValueTask', db=db, id='a'
+                , delay=0.1
+            )
+
+            #0.0
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(0, d['value'])
+
+            time.sleep(0.15) #0.15
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(1, d['value'])
+
+            time.sleep(0.2) #0.35
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(1, d['value'])
+
+            time.sleep(0.1) #0.45
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(2, d['value'])
+
+            time.sleep(0.3) #0.75
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(3, d['value'])
+
+            # At this point, we should have run 3 tasks and have a 4th queued.
+            taskDb = self.conn._database[self.conn.TASK_COLLECTION]
+            self.assertEqual(4, taskDb.find().count())
+
+        finally:
+            p.stop()
+
+
+    def test_intervalTask_fromStart(self):
+        db = self.conn._database['test']
+        p = lgTask.Processor(self.conf)
+        p.start()
+        try:
+            db.insert({ 'id': 'a', 'value': 0 })
+            self.conn.intervalTask('0.2 seconds', 'IncValueTask', fromStart=True
+                , db=db, id='a', delay=0.1
+            )
+
+            #0.0
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(0, d['value'])
+
+            time.sleep(0.15) #0.15
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(1, d['value'])
+
+            time.sleep(0.1) #0.25
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(1, d['value'])
+
+            time.sleep(0.1) #0.35
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(2, d['value'])
+
+            time.sleep(0.1) #0.45
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(2, d['value'])
+
+            time.sleep(0.1) #0.55
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(3, d['value'])
+
+            time.sleep(0.2) #0.75
+
+            # At this point, we should have run 4 tasks and have a 5th queued.
+            taskDb = self.conn._database[self.conn.TASK_COLLECTION]
+            self.assertEqual(5, taskDb.find().count())
+
+        finally:
+            p.stop()
+
+    def test_intervalTask_kwargs(self):
+        self.conn.intervalTask('1 second', 'IncValueTask')
+        try:
+            self.conn.intervalTask('2 seconds', 'IncValueTask')
+            self.fail('Did not raise TaskKwargError on diff interval')
+        except TaskKwargError:
+            pass
+        try:
+            self.conn.intervalTask('1 second', 'IncValueTask', a='a')
+            self.fail('Did not raise TaskKwargError on diff kwargs')
+        except TaskKwargError:
+            pass
+        try:
+            self.conn.intervalTask('1 second', 'IncValueTask', fromStart=True)
+            self.fail('Did not raise TaskKwargError on diff fromStart')
+        except TaskKwargError:
+            pass
+        try:
+            self.conn.intervalTask('1 second', 'IncValueTask')
+        except TaskKwargError:
+            self.fail('Did raise TaskKwargError on identical task')
     
     def test_singletonAssert(self):
         p = lgTask.Processor(self.conf, taskName="test_singletonAssert")

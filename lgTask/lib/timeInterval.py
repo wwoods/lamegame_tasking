@@ -18,14 +18,52 @@ class TimeInterval(timedelta):
         """Since we derive from timedelta which is special, we must use 
         __new__.
         """
-        parts = desc.split(' ')
-        kwargs = {}
-        for i in range(0, len(parts), 2):
-            qty = float(parts[i])
-            unit = parts[i + 1]
-            if unit[-1] == 's':
-                unit = unit[:-1]
-            unit = unit + "s"
-            kwargs[unit] = qty
+        if isinstance(desc, timedelta):
+            kwargs = { 
+                'days': desc.days
+                , 'seconds': desc.seconds
+                , 'microseconds': desc.microseconds
+            }
+        else:
+            parts = desc.split(' ')
+            kwargs = {}
+            for i in range(0, len(parts), 2):
+                qty = float(parts[i])
+                unit = parts[i + 1]
+                if unit[-1] == 's':
+                    unit = unit[:-1]
+                unit = unit + "s"
+                kwargs[unit] = qty
+
         instance = timedelta.__new__(TimeInterval, **kwargs)
         return instance
+
+    def __repr__(self):
+        return 'TimeInterval("' + self.__str__() + '")'
+
+    def __str__(self):
+        days = self.days
+        s = self.seconds
+        secs = s % 60
+        s //= 60
+        mins = s % 60
+        s //= 60
+        hours = s
+        msecs = self.microseconds
+
+        result = ''
+        if days: 
+            result += ' {0} day{1}'.format(days, 's' if days != 1 else '')
+        if hours: 
+            result += ' {0} hour{1}'.format(hours, 's' if hours != 1 else '')
+        if mins: 
+            result += ' {0} minute{1}'.format(mins, 's' if mins != 1 else '')
+        if secs: 
+            result += ' {0} second{1}'.format(secs, 's' if secs != 1 else '')
+        if msecs:
+            result += ' {0} microsecond{1}'.format(
+                msecs, 's' if msecs != 1 else ''
+            )
+        return result.strip()
+
+
