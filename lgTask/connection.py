@@ -40,9 +40,9 @@ class Connection(object):
     """Connects to a task database and performs operations with that database.
     """
     
-    TASK_COLLECTION = "task"
-    SCHEDULE_COLLECTION = "schedule"
-    SINGLETON_COLLECTION = "taskSingle"
+    TASK_COLLECTION = "lgTask"
+    SCHEDULE_COLLECTION = "lgTaskSchedule"
+    SINGLETON_COLLECTION = "lgTaskSingleton"
 
     class states(object):
         """Various states and collections of states."""
