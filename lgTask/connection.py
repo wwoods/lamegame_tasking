@@ -202,19 +202,27 @@ class Connection(object):
         schedDb = self._database[self.SCHEDULE_COLLECTION]
         old = schedDb.find_one({ '_id': taskName })
         if old:
-            if kwargs != old['kwargs'] or schedule != old['schedule']:
+            if \
+                taskClass != old['taskClass']
+                or kwargs != old['kwargs'] \
+                or schedule != old['schedule'] \
+                :
                 raise TaskKwargError(
                     ("Scheduled task with name {0} already "
-                        + "exists."
+                        + "exists with different parameters"
                     ).format(taskName)
                 )
             return
 
         try:
+            # The scheduler db must have enough information to re-launch the
+            # task.
             schedDb.insert(
-                { '_id': taskName
+                { 
+                    '_id': taskName
                     , 'kwargs': kwargs
                     , 'schedule': schedule
+                    , 'taskClass': taskClass
                 }
                 , safe=True
             )
@@ -615,9 +623,7 @@ class Connection(object):
         if not schedule:
             return None
 
-        now = taskStop # See assumption in docstring.
         result = None
-
         schedule = schedule['schedule']
         if schedule['interval']:
             interval = schedule['interval']
@@ -629,7 +635,31 @@ class Connection(object):
             raise ValueError("No appropriate scheduling method found")
             
         if result is not None:
-            if now > result:
-                result = now
+            if taskStop > result:
+                result = taskStop
         return result
-            
+
+    def _scheduleRestartTask(self, scheduleId):
+        """Called by scheduleAuditor when the task indicated by scheduleId
+        does not appear to be scheduled.  Does not run them immediately, 
+        but rather when the next scheduled runtime would be if the task
+        had started (and stopped) when this function is called.
+        """
+        schedDb = self._database[self.SCHEDULE_COLLECTION]
+        schedule = schedDb.find({ '_id': scheduleId })
+        if not schedule:
+            return
+
+        now = datetime.utcnow()
+        nextTime = self._scheduleGetNextRunTime(scheduleId, now, now)
+
+        taskClass = schedule['taskClass']
+        kwargs = schedule['kwargs']
+        taskArgs = {
+            '_id': scheduleId
+            , 'schedule': True
+            , 'tsRequest': nextTime
+        }
+        self._createTask(now, taskClass, taskArgs, kwargs)
+
+
