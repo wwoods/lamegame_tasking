@@ -7,10 +7,12 @@ from lgTask import Connection, Task, SingletonTask
 from lgTask.errors import SingletonAlreadyRunningError
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
+from lgTask.scheduleAuditTask import ScheduleAuditTask
 import os
 
 class Processor(SingletonTask):
-    """Processes tasks for the given db.
+    """Processes tasks for the given db.  Also performs certain administrative
+    actions (or ensures that they are performed) on the tasks database.
     """
 
     HEARTBEAT_INTERVAL = TimeInterval('0.5 seconds')
@@ -42,7 +44,7 @@ class Processor(SingletonTask):
         taskName = taskName or socket.gethostname()
         
         connection = Connection(self.config['lgTaskProcessor']['taskDatabase'])
-        connection.ensureIndexes()
+        connection._ensureIndexes()
         
         SingletonTask.__init__(self, taskConnection=connection
                 , taskName=taskName)
@@ -56,7 +58,10 @@ class Processor(SingletonTask):
         
     def run(self):
         """Run until our stop() is called"""
+        lastSchedulerAudit = None
+
         while not self.stopRequested:
+            lastSchedulerAudit = self._schedulerAudit(lastSchedulerAudit)
             self._checkTasks()
             if not self._consume():
                 import time
@@ -137,6 +142,8 @@ class Processor(SingletonTask):
         
     def _initTasksAvailable(self, taskDir):
         self._tasksAvailable = {}
+        # Add static tasks
+        self._tasksAvailable['ScheduleAuditTask'] = ScheduleAuditTask
         for file in os.listdir(taskDir):
             path = os.path.join(taskDir, file)
             if os.path.isfile(path) and path[-3:] == '.py':
@@ -157,3 +164,15 @@ class Processor(SingletonTask):
         for name, obj in inspect.getmembers(module):
             if inspect.isclass(obj) and issubclass(obj, Task):
                 self._tasksAvailable[name] = obj
+
+    def _schedulerAudit(self, lastTime):
+        """Checks if we need to batch up a new scheduler audit task and returns
+        the new scheduled time
+        """
+
+        now = datetime.datetime.utcnow()
+        if lastTime is None or now.minute != lastTime.minute:
+            self.taskConnection.batchTask('30 minutes', 'ScheduleAuditTask')
+            lastTime = now
+        return lastTime
+

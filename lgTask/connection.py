@@ -155,13 +155,6 @@ class Connection(object):
         kwargs = self._kwargsEncode(kwargs)
         self._createTask(now, taskClass, taskArgs, kwargs)
         
-    def ensureIndexes(self):
-        """Assert that all necessary indexes exist in the tasks collections 
-        to maintain performance.  Typically called by a Processor.
-        """
-        db = self._database[self.TASK_COLLECTION]
-        db.ensure_index( [ ('state', 1), ( 'taskClass', 1), ( 'tsRequest', -1 ) ] )
-
     def intervalTask(self, interval, taskClass, fromStart=False, **kwargs):
         """Schedule (or assert that a schedule exists for) a task to be
         executed at the given interval.
@@ -203,7 +196,7 @@ class Connection(object):
         old = schedDb.find_one({ '_id': taskName })
         if old:
             if \
-                taskClass != old['taskClass']
+                taskClass != old['taskClass'] \
                 or kwargs != old['kwargs'] \
                 or schedule != old['schedule'] \
                 :
@@ -552,6 +545,13 @@ class Connection(object):
                 
         return c
 
+    def _ensureIndexes(self):
+        """Assert that all necessary indexes exist in the tasks collections 
+        to maintain performance.  Typically called by a Processor.
+        """
+        db = self._database[self.TASK_COLLECTION]
+        db.ensure_index( [ ('state', 1), ( 'taskClass', 1), ( 'tsRequest', -1 ) ] )
+
     def _getRunAtTime(self, utcNow, runAt):
         """Changes a runAt variable that might be an interval or datetime,
         and returns a utc datetime.
@@ -646,7 +646,7 @@ class Connection(object):
         had started (and stopped) when this function is called.
         """
         schedDb = self._database[self.SCHEDULE_COLLECTION]
-        schedule = schedDb.find({ '_id': scheduleId })
+        schedule = schedDb.find_one({ '_id': scheduleId })
         if not schedule:
             return
 

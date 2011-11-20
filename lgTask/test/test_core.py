@@ -1,6 +1,7 @@
 """Tests that cover material in the basic usage of the README
 """
 
+import datetime
 import os
 import pymongo
 import time
@@ -126,7 +127,10 @@ class TestCore(TestCase):
         
         # Also assert that all tasks in the db have 'success' status
         nonSuccess = self.conn._database[self.conn.TASK_COLLECTION].find(
-            { 'state': { '$ne': 'success' } }        
+            { 
+                'state': { '$ne': 'success' }
+                , 'taskClass': { '$ne': 'ScheduleAuditTask' } 
+            }
         )
         self.assertEqual(0, nonSuccess.count())
         
@@ -184,13 +188,14 @@ class TestCore(TestCase):
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(2, d['value'])
 
-            time.sleep(0.3) #0.75
+            time.sleep(0.35) #0.80 (0.75 was failing sometimes)
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(3, d['value'])
 
             # At this point, we should have run 3 tasks and have a 4th queued.
             taskDb = self.conn._database[self.conn.TASK_COLLECTION]
-            self.assertEqual(4, taskDb.find().count())
+            spec = { 'taskClass': { '$ne': 'ScheduleAuditTask' } }
+            self.assertEqual(4, taskDb.find(spec).count())
 
         finally:
             p.stop()
@@ -234,7 +239,8 @@ class TestCore(TestCase):
 
             # At this point, we should have run 4 tasks and have a 5th queued.
             taskDb = self.conn._database[self.conn.TASK_COLLECTION]
-            self.assertEqual(5, taskDb.find().count())
+            spec = { 'taskClass': { '$ne': 'ScheduleAuditTask' } }
+            self.assertEqual(5, taskDb.find(spec).count())
 
         finally:
             p.stop()
@@ -260,6 +266,25 @@ class TestCore(TestCase):
             self.conn.intervalTask('1 second', 'IncValueTask')
         except TaskKwargError:
             self.fail('Did raise TaskKwargError on identical task')
+
+    def test_scheduleAudit(self):
+        taskDb = self.conn._database[self.conn.TASK_COLLECTION]
+
+        from lgTask.scheduleAuditTask import ScheduleAuditTask
+        audit = ScheduleAuditTask(self.conn)
+        self.conn.intervalTask('1 hour', 'IncValueTask')
+        # Remove the task entry
+        taskDb.remove({ '_id': 'IncValueTask' })
+        etime = datetime.datetime.utcnow() + TimeInterval('59 minutes')
+        audit.run()
+
+        # Ensure that the task entry now exists, one hour from now
+        d = taskDb.find_one({ '_id': 'IncValueTask' })
+        self.assertNotEqual(None, d)
+
+        self.assertTrue(etime < d['tsRequest'], 'Interval time not respected')
+        ftime = etime + TimeInterval('2 minutes')
+        self.assertTrue(d['tsRequest'] < ftime, 'Interval time not respected')
     
     def test_singletonAssert(self):
         p = lgTask.Processor(self.conf, taskName="test_singletonAssert")
