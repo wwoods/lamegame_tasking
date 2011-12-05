@@ -12,6 +12,10 @@ class TimeInterval(timedelta):
     Accepted units are days, hours, minutes, seconds.
 
     Can chain types: 1 hour 2 days
+
+    Can use the "ago" word last to create a negative interval: 1 hour ago
+
+    Can use "now" to indicate a zero interval: now
     """
     
     def __new__(cls, desc):
@@ -24,11 +28,19 @@ class TimeInterval(timedelta):
                 , 'seconds': desc.seconds
                 , 'microseconds': desc.microseconds
             }
+        elif desc == 'now':
+            kwargs = {}
         else:
             parts = desc.split(' ')
+            ago = False
+            if parts[-1] == 'ago':
+                parts = parts[:-1]
+                ago = True
             kwargs = {}
             for i in range(0, len(parts), 2):
                 qty = float(parts[i])
+                if ago:
+                    qty = -qty
                 unit = parts[i + 1]
                 if unit[-1] == 's':
                     unit = unit[:-1]

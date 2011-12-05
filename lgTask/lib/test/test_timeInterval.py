@@ -20,6 +20,11 @@ class TestTimeInterval(TestCase):
         self.assertEqual(timedelta(seconds=5, microseconds=250000), TimeInterval('5.25 seconds'))
         self.assertEqual(timedelta(microseconds=200000), TimeInterval('0.2 seconds'))
 
+        self.assertEqual(timedelta(seconds=-5), TimeInterval('5 seconds ago'))
+        self.assertEqual(timedelta(days=-2), TimeInterval('2 days ago'))
+
+        self.assertEqual(timedelta(days=0), TimeInterval('now'))
+
     def test_strAndRepr(self):
         a = TimeInterval('36 hours 4 minutes 1 second 2 microseconds')
         self.assertEqual(
