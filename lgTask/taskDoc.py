@@ -3,6 +3,8 @@
 Fields
 ======
 
+name = String - User specified or combination of taskClass and kwargs that must
+    be unique for any taskClass and kwarg combination.
 kwargs = dict - Parameters to pass to task run()
 lastLog = String - the last message logged.  Often this will be an exception or
     a summary of work accomplished.

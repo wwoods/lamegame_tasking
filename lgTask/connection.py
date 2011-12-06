@@ -1,5 +1,6 @@
 
 from datetime import datetime, timedelta
+import hashlib
 import pymongo
 import re
 
@@ -67,8 +68,8 @@ class Connection(object):
 
     def batchTask(self, runAt, taskClass, **kwargs):
         """Runs a task after a period of time; does not re-add this task
-        if a task already exists.  Uses the taskName kwarg to distinguish
-        batches.
+        if a task already exists.  Uses either taskName from kwargs or a
+        combination of taskClass and kwargs to distinguish batches.
 
         If the task is already scheduled and runAt comes before it was 
         previously scheduled to run, its schedule will be moved up to
@@ -160,7 +161,7 @@ class Connection(object):
         executed at the given interval.
 
         Raises a TaskKwargError if there is already a scheduler for this
-        taskClass and taskName.  
+        taskName (either user specified or combination of taskClass and kwargs)
 
         interval -- String or timedelta - The period of time to elapse between
         the end of one execution and the beginning of the next.  Pass the kwarg
@@ -513,6 +514,14 @@ class Connection(object):
         }
 
         taskDefaultArgs.update(taskArgs)
+
+        if '_id' in taskDefaultArgs:
+            taskDefaultArgs['name'] = taskDefaultArgs['_id']
+        else:
+            taskDefaultArgs['name'] = self._getTaskName(
+                taskClass
+                , kwargsEncoded
+            )
             
         taskColl = self._database[self.TASK_COLLECTION]
         taskColl.insert(taskDefaultArgs)
@@ -571,11 +580,20 @@ class Connection(object):
     def _getTaskName(self, taskClass, kwargs):
         """Gets the fully qualified task name for a given task class and 
         kwargs.
+
+        Modifies the dict kwargs in-place by removing the taskName kwarg.
         """
         className = taskClass
-        suffix = kwargs.get('taskName', None)
+        suffix = kwargs.pop('taskName', None)
         if suffix:
-            className += suffix
+            className += '-' + suffix
+        elif kwargs == {}:
+            # Ok, don't add any suffix.
+            pass
+        else:
+            m = hashlib.sha256()
+            m.update(repr(kwargs))
+            className += '-' + m.hexdigest()
         return className
 
     def _initPyMongo(self, connString):
@@ -641,9 +659,8 @@ class Connection(object):
 
     def _scheduleRestartTask(self, scheduleId):
         """Called by scheduleAuditor when the task indicated by scheduleId
-        does not appear to be scheduled.  Does not run them immediately, 
-        but rather when the next scheduled runtime would be if the task
-        had started (and stopped) when this function is called.
+        does not appear to be scheduled.  Since we don't know how long the
+        task has been inactive, it is scheduled immediately.  
         """
         schedDb = self._database[self.SCHEDULE_COLLECTION]
         schedule = schedDb.find_one({ '_id': scheduleId })
@@ -651,7 +668,10 @@ class Connection(object):
             return
 
         now = datetime.utcnow()
-        nextTime = self._scheduleGetNextRunTime(scheduleId, now, now)
+        # Since we don't know if it's been inactive for a long time, schedule
+        # now.
+        nextTime = now
+        # nextTime = self._scheduleGetNextRunTime(scheduleId, now, now)
 
         taskClass = schedule['taskClass']
         kwargs = schedule['kwargs']

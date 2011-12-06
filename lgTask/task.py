@@ -26,10 +26,10 @@ class Task(object):
         self._thread = None
         self._logs = []
 
-        self.taskName = self.__class__.__name__
+        self.taskName = taskData.get('name')
         taskName = kwargs.get('taskName', None)
         if taskName:
-            self.taskName += '-' + taskName
+            self.taskName = self.__class__.__name__ + '-' + taskName
         
     def __str__(self):
         type = self.__class__.__name__

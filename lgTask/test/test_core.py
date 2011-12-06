@@ -103,12 +103,19 @@ class TestCore(TestCase):
     def test_batchKwargs(self):
         # See if scheduling two batches with the same name but different
         # kwargs raises a TaskKwargError
-        self.conn.batchTask('1 second', 'IncValueTask', id='a')
+        self.conn.batchTask('1 second', 'IncValueTask', taskName='h', id='a')
         try:
-            self.conn.batchTask('1 second', 'IncValueTask', id='b')
+            self.conn.batchTask('1 second', 'IncValueTask', taskName='h'
+                , id='b')
             self.fail("Different kwargs did not raise TaskKwargError")
         except TaskKwargError:
             pass
+
+    def test_batchKwargsName(self):
+        # See if scheduling two different batches but not specifying a name is
+        # OK since the name should be derived from kwargs
+        self.conn.batchTask('1 second', 'IncValueTask', id='a')
+        self.conn.batchTask('1 second', 'IncValueTask', id='b')
     
     def test_consumeOne(self):
         db = self.conn._database['test']
@@ -246,24 +253,37 @@ class TestCore(TestCase):
             p.stop()
 
     def test_intervalTask_kwargs(self):
+        # Two unnamed tasks with the same kwargs but diff intervals should
+        # raise an error.
         self.conn.intervalTask('1 second', 'IncValueTask')
         try:
             self.conn.intervalTask('2 seconds', 'IncValueTask')
+            self.fail(
+                "Did not raise TaskKwargError on diff interval for unnamed"\
+            )
+        except TaskKwargError:
+            pass
+
+        self.conn.intervalTask('1 second', 'IncValueTask', taskName='a')
+        try:
+            self.conn.intervalTask('2 seconds', 'IncValueTask', taskName='a')
             self.fail('Did not raise TaskKwargError on diff interval')
         except TaskKwargError:
             pass
         try:
-            self.conn.intervalTask('1 second', 'IncValueTask', a='a')
+            self.conn.intervalTask('1 second', 'IncValueTask', taskName='a'
+                , a='a')
             self.fail('Did not raise TaskKwargError on diff kwargs')
         except TaskKwargError:
             pass
         try:
-            self.conn.intervalTask('1 second', 'IncValueTask', fromStart=True)
+            self.conn.intervalTask('1 second', 'IncValueTask', taskName='a'
+                , fromStart=True)
             self.fail('Did not raise TaskKwargError on diff fromStart')
         except TaskKwargError:
             pass
         try:
-            self.conn.intervalTask('1 second', 'IncValueTask')
+            self.conn.intervalTask('1 second', 'IncValueTask', taskName='a')
         except TaskKwargError:
             self.fail('Did raise TaskKwargError on identical task')
 
@@ -275,7 +295,7 @@ class TestCore(TestCase):
         self.conn.intervalTask('1 hour', 'IncValueTask')
         # Remove the task entry
         taskDb.remove({ '_id': 'IncValueTask' })
-        etime = datetime.datetime.utcnow() + TimeInterval('59 minutes')
+        etime = datetime.datetime.utcnow() + TimeInterval('1 second ago')
         audit.run()
 
         # Ensure that the task entry now exists, one hour from now
@@ -283,7 +303,7 @@ class TestCore(TestCase):
         self.assertNotEqual(None, d)
 
         self.assertTrue(etime < d['tsRequest'], 'Interval time not respected')
-        ftime = etime + TimeInterval('2 minutes')
+        ftime = etime + TimeInterval('2 seconds')
         self.assertTrue(d['tsRequest'] < ftime, 'Interval time not respected')
     
     def test_singletonAssert(self):
