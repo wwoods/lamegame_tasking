@@ -266,7 +266,7 @@ class Connection(object):
                 # Already running; a SingletonAlreadyRunningError should be
                 # raised, but for added debugging support, we'll make sure
                 # that our kwargs match theirs
-                ck = current['kwargs']
+                ck = current.get('kwargs', {})
                 if ck != taskKwargs:
                     raise TaskKwargError("{0} != {1}".format(ck, taskKwargs))
                 raise SingletonAlreadyRunningError()
