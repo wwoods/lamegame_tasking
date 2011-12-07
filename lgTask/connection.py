@@ -364,18 +364,7 @@ class Connection(object):
             # we have to convert kwargs
             kwargsOriginal = taskData['kwargs']
             task._kwargsOriginal = kwargsOriginal
-            kwargs = {}
-            for key,value in kwargsOriginal.items():
-                key = str(key)
-                if key == 'taskName':
-                    # Never put taskName into the decoded kwargs
-                    continue
-                kwargs[key] = value
-                for binding in self.bindingsDecode:
-                    newValue = binding(value)
-                    if newValue is not None:
-                        kwargs[key] = newValue
-                        break
+            kwargs = self._kwargsDecode(kwargsOriginal)
             task.kwargs = kwargs
             task.start(**kwargs)
             return task
@@ -615,16 +604,33 @@ class Connection(object):
         self._connection = db.connection
         self._database = db
 
-    def _kwargsEncode(self, kwargs):
-        """Encode kwargs from python objects to database objects
+    @classmethod
+    def _kwargsDecode(cls, kwargs):
+        """Decode kwargs from database (json) objects to python objects.
+        """
+        kwargsDecoded = {}
+        for key,value in kwargs.items():
+            # Py2.X requires string keys for dicts
+            key = str(key)
+            newValue = value
+            for binding in cls.bindingsDecode:
+                decodedValue = binding(value)
+                if decodedValue is not None:
+                    newValue = decodedValue
+            kwargsDecoded[key] = newValue
+        return kwargsDecoded
+
+    @classmethod
+    def _kwargsEncode(cls, kwargs):
+        """Encode kwargs from python objects to database (json) objects
         """
         kwargsEncoded = {}
         for key,value in kwargs.items():
             newValue = value
-            for binding in self.bindingsEncode:
-                decodedValue = binding(value)
-                if decodedValue is not None:
-                    newValue = decodedValue
+            for binding in cls.bindingsEncode:
+                encodedValue = binding(value)
+                if encodedValue is not None:
+                    newValue = encodedValue
                     break
             kwargsEncoded[key] = newValue
         return kwargsEncoded
