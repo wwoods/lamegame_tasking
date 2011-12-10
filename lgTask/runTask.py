@@ -12,9 +12,6 @@ def _runTask(taskClass, taskData, taskConnection):
         with open(logFile, 'a') as f:
             f.write(message + '\n')
 
-    import datetime
-    log("Initialized at {0}".format(datetime.datetime.utcnow().isoformat()))
-
     try:
         conn = taskConnection
         task = taskClass(conn, taskId, taskData)
