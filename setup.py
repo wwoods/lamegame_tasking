@@ -24,7 +24,7 @@ if __name__ == '__main__':
           data_files = [
               # Loose files to distribute with install
               # List of tuples of (destFolder, [ local_files ])
-              ('bin', [ 'bin/lgTaskProcessor' ])
+              ('bin', [ 'bin/lgTaskProcessor', 'bin/lgTaskRun' ])
           ],
           zip_safe=False,
           install_requires=[
