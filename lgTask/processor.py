@@ -2,116 +2,154 @@
 import datetime
 import imp
 import inspect
+import json
+import lockfile
+import multiprocessing
+from Queue import Empty, Queue
+import os
 import socket
-from lgTask import Connection, Task, SingletonTask
-from lgTask.errors import SingletonAlreadyRunningError
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from lgTask import Connection, Task, _runTask
+from lgTask.errors import ProcessorAlreadyRunningError
+from lgTask.lib.interruptableThread import InterruptableThread
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
 from lgTask.scheduleAuditTask import ScheduleAuditTask
-import os
 
-class Processor(SingletonTask):
+
+class _JsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat() + 'Z'
+        else:
+            return json.JSONEncoder.default(self, obj)
+
+class _JsonDecoder(json.JSONDecoder):
+    def default(self, s):
+        if len(s) == 27 and s.endswith('Z'):
+            return datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ")
+
+        # Fallback
+        return json.JSONDecoder.default(self, s)
+
+
+class Processor(object):
     """Processes tasks for the given db.  Also performs certain administrative
     actions (or ensures that they are performed) on the tasks database.
     """
 
-    HEARTBEAT_INTERVAL = TimeInterval('0.5 seconds')
-    MAX_TASKS = 1
-    MAX_TASKS__doc = """Python processes are inherently single-threaded because of the GIL.  MAX_TASKS only ever makes sense being 1, but is placed into a variable for this documentation."""
+    LOGFILE = 'processor.log'
+    NO_TASK_CHECK_INTERVAL = 0.5
+    NO_TASK_CHECK_INTERVAL__doc = 'Seconds to wait when we are not running ' \
+        + 'any tasks and cannot find a new task to run.'
     
-    def __init__(self, config, taskName=None):
-        """Creates a new task processor.
-        config -- File path (String) or dict object - We look for the following
-            parameters:
-            taskDatabase -- Connection string (see lgTask.Connection) - Where
-                the task database to pull tasks from resides.
-            taskDir -- Local path - Scan this folder for *.py files and
-                import any classes who derive from "Task".  These are the
-                tasks that this processor can process.
-            taskName -- Name of this task processor.  Will not be used if
-                taskName is passed to the __init__ function.
-        taskName -- String - The name to run this processor under.  If None,
-            use config['taskName'].  If that's None, use hostname.
+    def __init__(self):
+        """Creates a new task processor operating out of the current working
+        directory.  Uses processor.cfg as the config file.
         """
-        if isinstance(config, dict):
-            self.config = config
-        elif isinstance(config, basestring):
-            self.config = Config(config)
-        else:
-            raise ValueError("Unrecognized config type")
+        self.config = Config("processor.cfg")['processor']
         
-        taskName = taskName or self.config['lgTaskProcessor'].get('taskName') 
-        taskName = taskName or socket.gethostname()
-        
-        connection = Connection(self.config['lgTaskProcessor']['taskDatabase'])
+        connection = Connection(self.config['taskDatabase'])
         connection._ensureIndexes()
+        self.taskConnection = connection
         
-        SingletonTask.__init__(self, taskConnection=connection
-                , taskName=taskName)
-        
-        self._initTasksAvailable(self.config['lgTaskProcessor']['taskDir'])
-        self._tasks = []
+        self._tasksAvailable = self._getTasksAvailable()
+        self._monitors = {}
+
+        self._startTaskQueue = Queue()
+        self._stopOnNoTasks = False
+
+    def error(self, message):
+        error = traceback.format_exc()
+        self.log("{0} - {1}".format(message, error))
         
     def log(self, message):
         now = datetime.datetime.utcnow()
-        print("[{0}] - {1}".format(now, message))
+        print(message)
+        open('logs/' + self.LOGFILE, 'a').write(
+            "[{0}] - {1}\n".format(now, message)
+        )
         
     def run(self):
-        """Run until our stop() is called"""
-        lastSchedulerAudit = None
-
-        while not self.stopRequested:
-            lastSchedulerAudit = self._schedulerAudit(lastSchedulerAudit)
-            self._checkTasks()
-            if not self._consume():
-                import time
-                time.sleep(0.01)
-        
-        if self.stopRequested == 'onConsume':
-            # This is only ever used for debugging, but finish out all
-            # queued tasks.
-            while self._consume() or len(self._tasks) != 0:
-                self._checkTasks()
-                import time
-                time.sleep(0.01)
-                
-        
-    def stop(self, timeout=None, onNoTasksToConsume=False):
-        """Overrides Task.stop() since we need to be sure that all of our 
-        running tasks are also stopped.
-        
-        If onNoTasksToConsume is specified, this call will block until both
-        of the following are true:
-            There are no more tasks to consume
-            All running tasks are finished
+        """Run indefinitely or (for debugging) until no tasks are available.
         """
-        if onNoTasksToConsume:
-            self.stopRequested = 'onConsume'
-            self._thread.join()
-            SingletonTask.stop(self)
-        else:
-            SingletonTask.stop(self, timeout=timeout)
-            
-        # Our thread is dead; now merge other threads
-        while len(self._tasks) > 0:
-            t = self._tasks[0]
-            if t.isRunning():
-                t.stop(timeout=timeout)
-            self._checkTasks()
-            
-    def _checkTasks(self):
-        for t in self._tasks[:]:
-            if t.isRunning():
-                continue
-            
-            # The task is done
-            self._tasks.remove(t)
-            self.log("Finished task {0}: {1}".format(
-                getattr(t, 'taskName', t.__class__.__name__)
-                , t._logs[-1] if len(t._logs) > 0 else '(no log)'
-            ))
-                
-        
+
+        # .lock is automatically appended to FileLock (processor.lock)
+        self._lock = lockfile.FileLock('processor')
+        try: 
+            self._lock.acquire(timeout=0)
+        except lockfile.AlreadyLocked:
+            raise ProcessorAlreadyRunningError()
+        try:
+            try:
+                os.makedirs('logs')
+            except OSError:
+                pass
+            try:
+                os.makedirs('pids')
+            except OSError:
+                pass
+
+            self.log("Processor started")
+
+            # The advantage to multiprocessing is that since we are forking
+            # the process, our libraries don't need to load again.  This
+            # means that the startup time for new tasks is substantially
+            # (~ 0.5 sec in my tests) faster.
+            # The disadvantage is that there's a bug in python 2.6 that
+            # prohibits it from working from non-main threads.
+            self._useMultiprocessing = (
+                sys.version_info[0] >= 3
+                or sys.version_info[1] >= 7
+                or threading.current_thread().name == 'MainThread'
+            )
+            if self._useMultiprocessing:
+                self.log("Using multiprocessing")
+            else:
+                self.log("Not using multiprocessing - detected non-main thread")
+
+            # Run the scheduler loop; start with 1 task
+            self._startTaskQueue.put('any')
+            lastTime = datetime.datetime.utcnow()
+            while True:
+                self._monitorCurrentPids()
+                lastTime = self._schedulerAudit(lastTime)
+                try:
+                    next = self._startTaskQueue.get(timeout=5)
+                    result = self._consume()
+                    if not result:
+                        if self._stopOnNoTasks:
+                            break
+                        elif len(self._monitors) == 0:
+                            time.sleep(self.NO_TASK_CHECK_INTERVAL)
+                            self._startTaskQueue.put('any')
+                except Empty:
+                    # Timeout; time to run scheduler again, but OK
+                    pass
+        finally:
+            self._lock.release()
+
+    def start(self):
+        """Run the Processor asynchronously for test cases.
+        """
+        self.NO_TASK_CHECK_INTERVAL = 0.01
+        self._thread = InterruptableThread(target=self.run)
+        self._thread.start()
+
+    def stop(self):
+        """Halt an asynchronously started processor.
+        """
+        self._stopOnNoTasks = True
+        self._thread.join(5)
+        if self._thread.is_alive():
+            class ProcessorStop(Exception):
+                pass
+            self._thread.raiseException(ProcessorStop)
+
     def _consume(self):
         """Grab and consume a task if one is available.  All exceptions should
         be handled inline (not raised).
@@ -119,51 +157,175 @@ class Processor(SingletonTask):
         Returns True if a task is started.  False otherwise.
         """
 
-        if len(self._tasks) >= self.MAX_TASKS:
-            # We are already running our max count.  Do not accept new work.
-            return False
-
         c = self.taskConnection
         try:
-            task = c.startTask(self.taskName, self._tasksAvailable)
-        except SingletonAlreadyRunningError:
-            # We don't really care about this from a processor logging
-            # point of view.
-            pass
+            taskData = c._startTask(self._tasksAvailable)
+            if taskData is None:
+                return False
         except Exception as e:
             self.error("While starting task")
         else:
-            if task is not None:
-                self._tasks.append(task)
-                self.log("Started task {0}".format(
-                    getattr(task, 'taskName', task.__class__.__name__)
-                ))
+            taskId = taskData['_id']
+            latestStartTime = datetime.datetime.utcnow()
+            try:
+                # We write the full data for the task to the logfile as a 
+                # security 
+                # measure - if we pass it in the program arguments, anyone could
+                # read them.  It's also nice to have the exact parameters at 
+                # start
+                # available as part of the log.
+                with open(self._getLogFile(taskId), 'w') as f:
+                    f.write(json.dumps(taskData, cls=_JsonEncoder) + '\n')
+
+                if Task.DEBUG_TIMING:
+                    open(self._getLogFile(taskId), 'a').write(
+                        "Starting process at {0}\n".format(
+                            datetime.datetime.utcnow().isoformat()
+                        )
+                    )
+
+                if self._useMultiprocessing:
+                    args = ( 
+                        self._tasksAvailable[taskData['taskClass']]
+                        , taskData
+                        , self.taskConnection
+                    )
+                    process = multiprocessing.Process(
+                        target=_runTask
+                        , args=args
+                    )
+                    process.start()
+                else:
+                    # Get our task runner script
+                    taskRunner = os.path.abspath(os.path.join(
+                        __file__
+                        , '../../bin/lgTaskRun'
+                    ))
+                    
+                    args = (taskRunner,taskId)
+                    process = subprocess.Popen(args)
+
+                # Start was successful, start a PID file and monitor it
+                pid = process.pid
+                with open(self._getPidFile(taskId), 'w') as pidFile:
+                    pidFile.write(str(pid))
+                self._monitorPid(taskId, pid, latestStartTime)
                 return True
+            except Exception as e:
+                open(self._getLogFile(taskId), 'a').write(
+                    'Error on launch: ' + traceback.format_exc()
+                )
+                self.taskConnection.taskDied(taskId, latestStartTime)
+                raise
+
+    def _getLogFile(self, tid):
+        return 'logs/' + str(tid) + '.log'
+
+    def _getPidFile(self, tid):
+        return 'pids/' + str(tid) + '.pid'
         
-    def _initTasksAvailable(self, taskDir):
-        self._tasksAvailable = {}
-        # Add static tasks
-        self._tasksAvailable['ScheduleAuditTask'] = ScheduleAuditTask
-        for file in os.listdir(taskDir):
-            path = os.path.join(taskDir, file)
-            if os.path.isfile(path) and path[-3:] == '.py':
-                self._loadTasksFrom(path)
-                
-    def _loadTasksFrom(self, path):
-        """Thanks http://stackoverflow.com/questions/6811902/import-arbitrary-named-file-as-a-python-module !
+    @classmethod
+    def _getTasksAvailable(cls):
+        """Import the "tasks" module, and parse its members for derivation
+        from Task.
         """
-        module_name = os.path.splitext(os.path.basename(path))[0]
-        with open(path, 'U') as module_file:
-            module = imp.load_module(
-                module_name
-                , module_file
-                , path
-                , ( ".py", "U", imp.PY_SOURCE )
-            )
-            
-        for name, obj in inspect.getmembers(module):
+        import sys
+        oldPath = sys.path[:]
+        sys.path.insert(0, '.')
+        import tasks
+        sys.path.pop(0)
+
+        tasksAvailable = {}
+        for name, obj in inspect.getmembers(tasks):
             if inspect.isclass(obj) and issubclass(obj, Task):
-                self._tasksAvailable[name] = obj
+                tasksAvailable[name] = obj
+        return tasksAvailable
+
+    def _monitorCurrentPids(self):
+        """Spawn a monitor for each task in the pids folder; used on init and
+        could be used by sanity checks.  Will not double monitor any tasks.
+        """
+        for file in os.listdir('pids'):
+            path = os.path.join('pids', file)
+            if os.path.isfile(path) and path[-4:] == '.pid':
+                tid = file[:-4]
+                try:
+                    with open(path, 'r') as f:
+                        pid = int(f.read())
+                    oldMonitor = self._monitors.get(tid)
+                    if oldMonitor is None or not oldMonitor.isAlive():
+                        latestStart = datetime.datetime.utcfromtimestamp(
+                            os.getmtime(path)
+                        )
+                        self._monitorPid(tid, pid, latestStart)
+                except Exception, e:
+                    self.log("Error on loading task pid {0}: {1}".format(
+                        tid, e
+                    ))
+
+    def _monitorPid(self, tid, pid, latestStart):
+        """Monitors the specified task, which is running under the given pid.
+
+        latestStart - See _monitorPid_thread
+        """
+        t = threading.Thread(
+            target=self._monitorPid_thread
+            , args=(tid, pid, latestStart)
+        )
+        t.daemon = True
+        self._monitors[tid] = t
+        t.start()
+        self.log("Monitoring task {0}:{1}".format(tid, pid))
+    
+    def _monitorPid_thread(self, tid, pid, latestStart):
+        """Monitors the given process until it terminates.  This thread is
+        daemonic; that is, it is assumed insignificant if it dies (it must
+        be able to recover).
+
+        This thread is responsible for cleaning up the pid file on task
+        completion.
+
+        latestStart - An upper bound on the start time for the process.  Used
+            for preventing database corruption on task death.
+        """
+        while True:
+            try:
+                try:
+                    # For efficiency, we want to use event-driven wait for
+                    # a process if possible.
+                    os.waitpid(pid, 0)
+                except OSError:
+                    # If we're waiting on a non-child process, we have to do 
+                    # our own polling loop
+                    while True:
+                        try:
+                            os.kill(pid, 0)
+                            time.sleep(0.1)
+                        except OSError:
+                            break
+            except Exception, e:
+                self.log("Monitor exception for {0}:{1} - {2}".format(
+                    tid, pid, e
+                ))
+            else:
+                # The only way to reach here is for the process to have died.
+                # We want to clean up the pid file and ensure that the database
+                # entry is OK.
+                try:
+                    self.taskConnection.taskDied(tid, latestStart)
+                    os.remove(self._getPidFile(tid))
+                except Exception, e:
+                    self.log(
+                        "Monitor exception in end for {0}:{1} - {2}".format(
+                            tid, pid, e
+                        )
+                    )
+                break
+
+        # Try to add a new process
+        self._monitors.pop(tid)
+        self._startTaskQueue.put('any')
+        self.log("Monitor finished {0}:{1}".format(tid, pid))
 
     def _schedulerAudit(self, lastTime):
         """Checks if we need to batch up a new scheduler audit task and returns

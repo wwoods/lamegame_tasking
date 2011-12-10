@@ -1,0 +1,75 @@
+#! /usr/bin/python
+
+import datetime
+import json
+import os
+import sys
+import traceback
+
+# Alter path to use THIS distro of lgTaskRun
+sys.path.insert(0, os.path.abspath(os.path.join(__file__, '../../')))
+
+import lgTask
+from lgTask.lib.reprconf import Config
+
+global taskId
+global lastLog
+
+def getLogFile():
+    return 'logs/' + str(taskId) + '.log'
+
+def log(message):
+    global lastLog
+    lastLog = message
+    print(message)
+    with open(getLogFile(), 'a') as f:
+        f.write(message + '\n')
+
+def runTask(taskData):
+    try:
+        processorConfig = Config('processor.cfg')['processor']
+        conn = lgTask.Connection(processorConfig['taskDatabase'])
+
+        taskClasses = lgTask.Processor._getTasksAvailable()
+        taskClass = taskClasses[taskData['taskClass']]
+
+        task = taskClass(
+            conn
+            , taskId
+            , taskData
+        )
+
+        # we have to convert kwargs
+        kwargsOriginal = taskData['kwargs']
+        task._kwargsOriginal = kwargsOriginal
+        kwargs = conn._kwargsDecode(kwargsOriginal)
+        task.kwargs = kwargs
+    except Exception, e:
+        log("Exception during init: " + traceback.format_exc())
+    else:
+        success = True
+        try:
+            task.log = log
+            if task.DEBUG_TIMING:
+                log("Starting task at {0}".format(
+                    datetime.datetime.utcnow().isoformat()
+                ))
+        
+            success = task.run(**kwargs)
+            if success is None:
+                # Treat no return value as success
+                success = True
+        except Exception, e:
+            log("Unhandled exception: " + traceback.format_exc())
+            success = False
+        finally:
+            global lastLog
+            conn.taskStopped(task, success, lastLog)
+
+if __name__ == '__main__':
+    taskId = sys.argv[1]
+    with open(getLogFile(), 'r') as f:
+        data = f.readline().strip()
+    taskData = json.loads(data, cls=lgTask.processor._JsonDecoder)
+    runTask(taskData)
+

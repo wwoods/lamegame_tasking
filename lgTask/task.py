@@ -1,16 +1,17 @@
 
-import ctypes
-import inspect
+import datetime
 from lgTask.errors import *
 from lgTask.lib.compat import cherrypy_subscribe
 from lgTask.lib.interruptableThread import InterruptableThread
 import traceback
-import pymongo
 
 class Task(object):
     """Runs the run() function with our given kwargs in a new thread. 
     Manages communication with that thread.
     """
+
+    DEBUG_TIMING = False
+    DEBUG_TIMING__doc = "Add initialization timestamps to logs"
     
     class StopTaskError(Exception):
         """Raised in thread running task when stop() is called and times out.
@@ -26,16 +27,9 @@ class Task(object):
         self._thread = None
         self._logs = []
 
-        self.taskName = taskData.get('name')
-        taskName = kwargs.get('taskName', None)
-        if taskName:
-            self.taskName = self.__class__.__name__ + '-' + taskName
-        
     def __str__(self):
         type = self.__class__.__name__
-        if hasattr(self, taskName):
-            type += "-{0}".format(taskName)
-        return "Task<{0}>".format(type)
+        return "Task<{0} - {1}>".format(type, self.taskId)
         
     def error(self, message=''):
         if message:
@@ -84,7 +78,7 @@ class Task(object):
         """Called when the task finishes; must be callable multiple times,
         since StopTaskError can be raised in the middle of it.
         """
-        self.taskConnection.taskStopped(self, success, self._logs)
+        self.taskConnection.taskStopped(self, success, self._logs[-1])
         
         
         

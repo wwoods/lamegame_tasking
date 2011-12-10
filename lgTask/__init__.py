@@ -4,6 +4,7 @@
 from .errors import *
 from .connection import Connection
 from .task import Task
-from .singletonTask import SingletonTask
+from .runTask import _runTask
 from .processor import Processor
 from .lib.timeInterval import TimeInterval
+

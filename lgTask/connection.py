@@ -1,8 +1,12 @@
 
 from datetime import datetime, timedelta
 import hashlib
+import json
 import pymongo
 import re
+import socket
+import subprocess
+import uuid
 
 from lgTask.errors import *
 from lgTask.lib.timeInterval import TimeInterval
@@ -43,7 +47,6 @@ class Connection(object):
     
     TASK_COLLECTION = "lgTask"
     SCHEDULE_COLLECTION = "lgTaskSchedule"
-    SINGLETON_COLLECTION = "lgTaskSingleton"
 
     class states(object):
         """Various states and collections of states."""
@@ -75,9 +78,7 @@ class Connection(object):
         previously scheduled to run, its schedule will be moved up to
         the new runAt time.
 
-        Batched tasks have all of the properties of singleton tasks; the 
-        difference is that batched tasks must run inside the task processing
-        framework, and not as independent entities.
+        Batched tasks will only run at most one instance at a time.
 
         Raises TaskKwargError if a scheduled batch task already exists, but
         the kwargs are different.
@@ -234,100 +235,14 @@ class Connection(object):
         }
         self._createTask(now, taskClass, taskArgs, kwargs)
 
-    def singletonAcquire(self, singleton):
-        """Acquire the singleton running permissions for taskName or 
-        raise a SingletonAlreadyRunningError exception.
+    def _startTask(self, availableTasks):
+        """Gets a task from our database and marks it in the database as 
+        started on this machine.
+       
+        Returns the taskData to be launched on success.  Returns None if no
+        suitable task was found.
         
-        Returns the time that heartbeat is set to when we have acquired the 
-        lock
-        """
-        taskName = singleton.taskName
-        # getattr instead of direct; if this singleton is not spawned through
-        # a processor, it will not have _kwargsOriginal.
-        taskKwargs = getattr(singleton, '_kwargsOriginal', {})
-        heartbeat = singleton.HEARTBEAT_INTERVAL
-        c = self._database[self.SINGLETON_COLLECTION]
-        # Check if already running, cautious upsert if not.
-        now = datetime.utcnow()
-        maxHeartbeat = now - heartbeat * 2
-        current = c.find_one({ '_id': taskName })
-        if current is None:
-            # None of this singleton have ever run before... try inserting a
-            # record.
-            try: 
-                c.insert(
-                    { '_id': taskName, 'heartbeat': now, 'kwargs': taskKwargs }
-                    , safe=True
-                )
-            except pymongo.errors.DuplicateKeyError:
-                raise SingletonAlreadyRunningError()
-        else:
-            if current.get('heartbeat', datetime.min) >= maxHeartbeat:
-                # Already running; a SingletonAlreadyRunningError should be
-                # raised, but for added debugging support, we'll make sure
-                # that our kwargs match theirs
-                ck = current.get('kwargs', {})
-                if ck != taskKwargs:
-                    raise TaskKwargError("{0} != {1}".format(ck, taskKwargs))
-                raise SingletonAlreadyRunningError()
-            r = c.find_and_modify(
-                {
-                    '_id': taskName
-                    , 'heartbeat': current.get('heartbeat', None) 
-                }
-                , {
-                    '_id': taskName
-                    , 'heartbeat': now
-                }
-            )
-            if r is None:
-                raise SingletonAlreadyRunningError()
-            
-        # Return our heartbeat
-        return now
-            
-    def singletonHeartbeat(self, taskName, expectedLast):
-        """Register a heartbeat for the given singleton.  Raises a 
-        SingletonAlreadyRunningError error if the last heartbeat does not match the
-        expected heartbeat; this indicates that, at some point, another version
-        of our singleton was started, and we should abort.
-        
-        Returns the new heartbeat value if set OK.
-        """
-        c = self._database[self.SINGLETON_COLLECTION]
-        now = datetime.utcnow()
-        result = c.find_and_modify(
-            { '_id': taskName, 'heartbeat': expectedLast }
-            , { '$set': { 'heartbeat': now } }
-        )
-        if result is None:
-            # NOTE - In tests, this can also happen when you forget to stop()
-            # a processor!
-            raise SingletonAlreadyRunningError()
-        return now
-        
-    def singletonRelease(self, taskName, lastHeartbeat):
-        """Assuming we have the singleton for taskName, release it.
-        """
-        # We already have the lock, so just releasing our heartbeat should
-        # be fine.
-        c = self._database[self.SINGLETON_COLLECTION]
-        c.find_and_modify(
-            { '_id': taskName, 'heartbeat': lastHeartbeat }
-            , { '$unset': { 'heartbeat': 1 } }
-        )
-        
-    def startTask(self, processorName, availableTasks):
-        """Gets a task from our database and calls its start() method.
-        
-        Returns either the new Task object or None if no suitable task was
-        found.  
-        
-        Exceptions are forwarded to the caller.
-
-        processorName -- String - The full name of the processor.
-        
-        availableTasks: a dict of (ClassName, ClassObj) pairs that determines
+        availableTasks: a dict of (ClassName, ClassObj) pairs that determine
             what tasks may be started by this slave.
         """
         c = self._database[self.TASK_COLLECTION]
@@ -341,42 +256,41 @@ class Connection(object):
             , { '$set': {
                 'state': 'working'
                 , 'tsStart': now
-                , 'processor': processorName
+                , 'host': socket.gethostname()
             }}
             , new = True
         )
+
+        return taskData
+
+    def taskDied(self, taskId, startedBefore):
+        """Called when a task's process is detected as dead.  Updates the 
+        database unless the status is success or error.
+
+        The task must be running on the machine this is called on to have
+        any effect.
+
+        startedBefore - Since batched tasks can be re-inserted into the 
+            database and potentially restarted before this function is called,
+            we need to use a known upper bound on start time to prevent
+            data corruption.
+        """
+        c = self._database[self.TASK_COLLECTION]
+        now = datetime.utcnow()
+        c.update(
+            { 
+                '_id': taskId
+                , 'state': self.states.WORKING
+                , 'tsStart': { '$lte': startedBefore }
+            }
+            , { '$set': { 
+                'state': 'error'
+                , 'lastLog': 'Task died - see log' 
+                , 'tsStop': now
+            } }
+        )
         
-        if taskData is None:
-            return None
-        
-        taskId = taskData['_id']
-        try:
-            # This isn't the full task name; we let the task class handle
-            # adding the class prefix.
-            taskNameSuffix = taskData['kwargs'].get('taskName', None)
-            task = availableTasks[taskData['taskClass']](
-                    taskConnection=self
-                    ,taskName=taskNameSuffix
-                    ,taskData=taskData
-                    ,taskId=taskId
-                )
-            # Since py2.X requires kwargs keys to be str types and not unicode,
-            # we have to convert kwargs
-            kwargsOriginal = taskData['kwargs']
-            task._kwargsOriginal = kwargsOriginal
-            kwargs = self._kwargsDecode(kwargsOriginal)
-            task.kwargs = kwargs
-            task.start(**kwargs)
-            return task
-        except SingletonAlreadyRunningError:
-            # Maybe should just delete the task... 
-            self.taskStopped(taskId, True, [ 'SingletonTask already running' ])
-            raise
-        except Exception as e:
-            self.taskStopped(taskId, False, [ 'Error starting task: ' + str(e) ])
-            raise
-        
-    def taskStopped(self, taskOrId, success, logs):
+    def taskStopped(self, taskOrId, success, lastLog):
         """Update the database noting that a task has stopped.  Must be callable
         multiple times; see Task._finished.
         
@@ -384,7 +298,7 @@ class Connection(object):
         
         success - True for success, False for error
         
-        logs - array of log entries.
+        lastLog - The last log message.
         """
         c = self._database[self.TASK_COLLECTION]
         if not isinstance(taskOrId, basestring):
@@ -398,8 +312,7 @@ class Connection(object):
         finishUpdates = {
             'state': 'success' if success else 'error'
             , 'tsStop': now
-            , 'lastLog': logs[-1] if len(logs) > 0 \
-                else '(No log entries)'
+            , 'lastLog': lastLog
         }
 
         if \
@@ -504,14 +417,9 @@ class Connection(object):
 
         taskDefaultArgs.update(taskArgs)
 
-        if '_id' in taskDefaultArgs:
-            taskDefaultArgs['name'] = taskDefaultArgs['_id']
-        else:
-            taskDefaultArgs['name'] = self._getTaskName(
-                taskClass
-                , kwargsEncoded
-            )
-            
+        if '_id' not in taskDefaultArgs:
+            taskDefaultArgs['_id'] = uuid.uuid4().hex
+
         taskColl = self._database[self.TASK_COLLECTION]
         taskColl.insert(taskDefaultArgs)
                 

@@ -4,8 +4,9 @@
 import datetime
 import os
 import pymongo
+import shutil
 import time
-from unittest import TestCase
+from unittest import TestCase, skip
 
 import lgTask
 from lgTask.errors import *
@@ -14,66 +15,69 @@ from lgTask.lib.timeInterval import TimeInterval
 
 class TestCore(TestCase):
     def setUp(self):
-        self.path = os.path.dirname(os.path.abspath(__file__))
-        self.conf = Config(os.path.join(self.path, 'testProcessor.cfg'))
-        lgp = self.conf['lgTaskProcessor']
-        lgp['taskDir'] = lgp['taskDir'].replace("./", self.path + "/")
-        self.conn = lgTask.Connection(lgp['taskDatabase'])
+        self.oldpath = os.getcwd()
+        os.chdir(os.path.abspath(
+            os.path.join(__file__, '../testProcessor')
+        ))
+
+        try:
+            pass#shutil.rmtree('logs')
+        except OSError:
+            pass
+        try:
+            pass#shutil.rmtree('pids')
+        except OSError:
+            pass
+        try:
+            os.remove('processor.lock')
+        except OSError:
+            pass
+
+        self.conf = Config('processor.cfg')
+        self.conn = lgTask.Connection(self.conf['processor']['taskDatabase'])
         self.conn._database.drop_collection('test')
         self.conn._database.drop_collection(self.conn.TASK_COLLECTION)
-        self.conn._database.drop_collection(self.conn.SINGLETON_COLLECTION)
         self.conn._database.drop_collection(self.conn.SCHEDULE_COLLECTION)
 
+    def tearDown(self):
+        os.chdir(self.oldpath)
+
     def test_batch(self):
-        p = lgTask.Processor(self.conf)
+        p = lgTask.Processor()
         p.start()
         try:
             db = self.conn._database['test']
-            db.insert({ 'id': 'c', 'value': 1 })
+            db.insert({ 'id': 'c', 'value': 0 })
+            self.conn.batchTask('0.5 seconds', 'IncValueTask', db=db, id='c')
+            self.conn.batchTask('0.5 seconds', 'IncValueTask', db=db, id='c')
+            self.conn.batchTask('0.5 seconds', 'IncValueTask', db=db, id='c')
+            time.sleep(0.75)
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(1, d['value'])
             self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
-            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
-            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
-            time.sleep(0.2)
+            time.sleep(0.5)
             d = db.find_one({ 'id': 'c' })
             self.assertEqual(2, d['value'])
-            self.conn.batchTask('0.1 seconds', 'IncValueTask', db=db, id='c')
-            time.sleep(0.2)
-            d = db.find_one({ 'id': 'c' })
-            self.assertEqual(3, d['value'])
             # Test queueing
-            # 0 - delay 0.05 inc value
-            # 0.1 - IV1 is in delay but running, IV2 is batch queued
-            # 0.2 - IV1 should still be in delay
-            # 0.3 - IV1 changed value and exits
-            # 0.4 - IV2 should still be in batch delay
-            # 0.5 - IV2 should start running
-            # 0.6 - IV2 should be in task delay
-            # 0.7 - IV2 should finish task delay
+            # Start an IncValue, while it's running batch another
             self.conn.batchTask('0.05 seconds', 'IncValueTask', db=db, id='c'
-                , delay=0.2
+                , delay=0.5
             )
-            time.sleep(0.1) #0.1
-            self.conn.batchTask('0.4 seconds', 'IncValueTask', db=db, id='c'
-                , delay=0.2 # We don't want a delay, but want same kwargs
+            time.sleep(0.25) #0.25 - in IncValueTask
+            self.conn.batchTask('1.0 seconds', 'IncValueTask', db=db, id='c'
+                , delay=0.5 # We don't want a delay, but want same kwargs
             )
+            d = db.find_one({ 'id': 'c' })
+            self.assertEqual(2, d['value'])
+            time.sleep(0.5) #0.75 - First finished
             d = db.find_one({ 'id': 'c' })
             self.assertEqual(3, d['value'])
-            time.sleep(0.1) #0.2
-            # Shouldn't have changed, if we respected batch delay
+            time.sleep(0.75) #1.5 - Second should be in delay
             d = db.find_one({ 'id': 'c' })
             self.assertEqual(3, d['value'])
-            time.sleep(0.1) #0.3
+            time.sleep(0.5) #2.0 - second should have effected
             d = db.find_one({ 'id': 'c' })
             self.assertEqual(4, d['value'])
-            time.sleep(0.1) #0.4
-            d = db.find_one({ 'id': 'c' })
-            self.assertEqual(4, d['value'])
-            time.sleep(0.2) #0.6
-            d = db.find_one({ 'id': 'c' })
-            self.assertEqual(4, d['value'])
-            time.sleep(0.2) #0.8
-            d = db.find_one({ 'id': 'c' })
-            self.assertEqual(5, d['value'])
         finally:
             p.stop()
 
@@ -122,9 +126,9 @@ class TestCore(TestCase):
         db.insert({ 'id': 'a', 'value': 6 })
         db.insert({ 'id': 'b', 'value': 6 })
         self.conn.createTask("IncValueTask", db=db, id='a')
-        p = lgTask.Processor(self.conf, taskName="test_consumeOne")
+        p = lgTask.Processor()
         p.start()
-        p.stop(onNoTasksToConsume=True)
+        p.stop()
         
         self.assertEqual(7, db.find_one({ 'id': 'a' })['value'])
         self.assertEqual(6, db.find_one({ 'id': 'b' })['value'])
@@ -150,7 +154,7 @@ class TestCore(TestCase):
     def test_consumeDelayed(self):
         db = self.conn._database['test']
         db.insert({ 'id': 'a', 'value': 6 })
-        p = lgTask.Processor(self.conf, taskName='test_consumeDelayed')
+        p = lgTask.Processor()
         p.start()
         try:
             self.conn.delayedTask(
@@ -163,7 +167,7 @@ class TestCore(TestCase):
             time.sleep(0.3)
             doc = db.find_one({ 'id': 'a' })
             self.assertEqual(6, doc['value'])
-            time.sleep(0.3)
+            time.sleep(0.5)
             doc = db.find_one({ 'id': 'a' })
             self.assertEqual(7, doc['value'])
         finally:
@@ -171,38 +175,42 @@ class TestCore(TestCase):
 
     def test_intervalTask(self):
         db = self.conn._database['test']
-        p = lgTask.Processor(self.conf)
+        p = lgTask.Processor()
         p.start()
         try:
             db.insert({ 'id': 'a', 'value': 0 })
-            self.conn.intervalTask('0.2 seconds', 'IncValueTask', db=db, id='a'
-                , delay=0.1
+            self.conn.intervalTask('1.0 seconds', 'IncValueTask', db=db, id='a'
+                , delay=1.0
             )
 
             #0.0
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(0, d['value'])
 
-            time.sleep(0.15) #0.15
+            time.sleep(0.5) #0.5
+            d = db.find_one({ 'id': 'a' })
+            self.assertEqual(0, d['value'])
+
+            time.sleep(1.0) #1.5
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(1, d['value'])
 
-            time.sleep(0.2) #0.35
+            time.sleep(1.0) #2.5
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(1, d['value'])
 
-            time.sleep(0.1) #0.45
+            time.sleep(1.0) #3.5
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(2, d['value'])
 
-            time.sleep(0.35) #0.80 (0.75 was failing sometimes)
+            time.sleep(1.0) #4.5
             d = db.find_one({ 'id': 'a' })
-            self.assertEqual(3, d['value'])
+            self.assertEqual(2, d['value'])
 
-            # At this point, we should have run 3 tasks and have a 4th queued.
+            # At this point, we should have run 2 tasks and have a 3rd queued
             taskDb = self.conn._database[self.conn.TASK_COLLECTION]
             spec = { 'taskClass': { '$ne': 'ScheduleAuditTask' } }
-            self.assertEqual(4, taskDb.find(spec).count())
+            self.assertEqual(3, taskDb.find(spec).count())
 
         finally:
             p.stop()
@@ -210,44 +218,25 @@ class TestCore(TestCase):
 
     def test_intervalTask_fromStart(self):
         db = self.conn._database['test']
-        p = lgTask.Processor(self.conf)
+        p = lgTask.Processor()
         p.start()
         try:
             db.insert({ 'id': 'a', 'value': 0 })
-            self.conn.intervalTask('0.2 seconds', 'IncValueTask', fromStart=True
-                , db=db, id='a', delay=0.1
+            self.conn.intervalTask('1.0 seconds', 'IncValueTask', fromStart=True
+                , db=db, id='a', delay=0.5
             )
 
             #0.0
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(0, d['value'])
 
-            time.sleep(0.15) #0.15
+            time.sleep(1.0) #1.0 - first iteration completed at 0.5
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(1, d['value'])
 
-            time.sleep(0.1) #0.25
-            d = db.find_one({ 'id': 'a' })
-            self.assertEqual(1, d['value'])
-
-            time.sleep(0.1) #0.35
+            time.sleep(0.75) #1.75 - second should have started at 1.0
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(2, d['value'])
-
-            time.sleep(0.1) #0.45
-            d = db.find_one({ 'id': 'a' })
-            self.assertEqual(2, d['value'])
-
-            time.sleep(0.1) #0.55
-            d = db.find_one({ 'id': 'a' })
-            self.assertEqual(3, d['value'])
-
-            time.sleep(0.2) #0.75
-
-            # At this point, we should have run 4 tasks and have a 5th queued.
-            taskDb = self.conn._database[self.conn.TASK_COLLECTION]
-            spec = { 'taskClass': { '$ne': 'ScheduleAuditTask' } }
-            self.assertEqual(5, taskDb.find(spec).count())
 
         finally:
             p.stop()
@@ -306,86 +295,22 @@ class TestCore(TestCase):
         ftime = etime + TimeInterval('2 seconds')
         self.assertTrue(d['tsRequest'] < ftime, 'Interval time not respected')
     
-    def test_singletonAssert(self):
-        p = lgTask.Processor(self.conf, taskName="test_singletonAssert")
+    def test_processorOnlyOneInstance(self):
+        p = lgTask.Processor()
         p.start()
         try:
-            p2 = lgTask.Processor(self.conf, taskName="test_singletonAssert")
-            p2.start()
-            p2.stop()
-            self.fail("Two singletons were running under same name.")
-        except lgTask.errors.SingletonAlreadyRunningError:
+            p2 = lgTask.Processor()
+            p2._stopOnNoTasks = True
+            p2.run()
+            self.fail("Two processors were running in same dir")
+        except lgTask.errors.ProcessorAlreadyRunningError:
             pass
         finally:
             p.stop()
 
-    def test_singletonDiffKwargs(self):
-        # Assert that a singleton trying to start during the run of the 
-        # same singleton raises TaskKwargError rather than 
-        # SingletonAlreadyRunningError (for added visibility at system 
-        # instabilities; that is, we don't want to throw away data)
-        p = lgTask.Processor(self.conf, taskName="test_singletonDiffKwargs")
-        p2 = lgTask.Processor(self.conf, taskName="test_singletonDiffKwargs")
-        # Emulate different kwargs
-        p2._kwargsOriginal = { 'a': 'b' }
-        p.start()
-        try:
-            p2.start()
-            p2.stop()
-            self.fail("Two singletons with different kwargs did not raise "
-                + "TaskKwargError"
-            )
-        except lgTask.errors.TaskKwargError:
-            pass
-        finally:
-            p.stop()
-
-            
-    def test_singletonHeartbeat(self):
-        p = lgTask.Processor(self.conf, taskName='test_singletonHeartbeat')
-        p.HEARTBEAT_INTERVAL = TimeInterval('0.1 seconds')
-        p.start()
-        try:
-            time.sleep(0.3)
-            p2 = lgTask.Processor(self.conf, taskName='test_singletonHeartbeat')
-            p2.HEARTBEAT_INTERVAL = p.HEARTBEAT_INTERVAL
-            try:
-                p2.start()
-                p2.stop()
-                self.fail("Should have raised SingletonAlreadyRunningError")
-            except lgTask.errors.SingletonAlreadyRunningError:
-                pass
-        finally:
-            p.stop()
-            
-    def test_singletonReleaseOnStop(self):
-        p = lgTask.Processor(self.conf, taskName="test_singletonRelease")
-        p2 = lgTask.Processor(self.conf, taskName="test_singletonRelease")
-        p.start()
-        p.stop()
-        p2.start()
-        p2.stop()
-        
-    def test_singletonReleaseOnTimeout(self):
-        p = lgTask.Processor(self.conf, taskName="test_singletonReleaseTime")
-        p2 = lgTask.Processor(self.conf, taskName="test_singletonReleaseTime")
-        p.HEARTBEAT_INTERVAL = TimeInterval('0.2 seconds')
-        p2.HEARTBEAT_INTERVAL = p.HEARTBEAT_INTERVAL
-        p.start()
-        # Timeout while circumventing singleton release
-        lgTask.Task.stop(p)
-        p._stopHeartbeat()
-        time.sleep(0.5)
-        p2.start()
-        p2.stop()
-
-    def test_processorConfigTaskName(self):
-        self.conf['lgTaskProcessor']['taskName'] = 'test'
-        p = lgTask.Processor(self.conf)
-        self.assertEqual('Processor-test', p.taskName)
-
+    @skip("Max tasks not currently implemented")
     def test_processorMaxTasks(self):
-        p = lgTask.Processor(self.conf, taskName="test_processorMaxTasks")
+        p = lgTask.Processor()
         p.start()
 
         try:
