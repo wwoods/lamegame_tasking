@@ -255,7 +255,6 @@ class Processor(object):
             del tasks
         except (KeyError, UnboundLocalError):
             import tasks
-        print("WHAT? " + repr(tasks))
         sys.path.pop(0)
 
         tasksAvailable = {}
@@ -268,8 +267,8 @@ class Processor(object):
         """Spawn a monitor for each task in the pids folder; used on init and
         could be used by sanity checks.  Will not double monitor any tasks.
         """
-        for file in os.listdir('pids'):
-            path = os.path.join('pids', file)
+        for file in os.listdir(self.getPath('pids')):
+            path = os.path.join(self.getPath('pids'), file)
             if os.path.isfile(path) and path[-4:] == '.pid':
                 tid = file[:-4]
                 try:
