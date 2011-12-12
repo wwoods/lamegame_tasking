@@ -12,7 +12,7 @@ try:
         def addTask(self, task):
             self.tasks.append(task)
             for t in self.tasks[:]:
-                if not t.isRunning():
+                if not t._thread.is_alive():
                     self.tasks.remove(t)
         def stop(self):
             for t in self.tasks:

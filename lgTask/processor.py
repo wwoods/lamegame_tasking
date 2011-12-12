@@ -15,6 +15,7 @@ import time
 import traceback
 from lgTask import Connection, Task, _runTask
 from lgTask.errors import ProcessorAlreadyRunningError
+from lgTask.lib.compat import cherrypy_subscribe
 from lgTask.lib.interruptableThread import InterruptableThread
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
@@ -151,12 +152,13 @@ class Processor(object):
         self.NO_TASK_CHECK_INTERVAL = 0.01
         self._thread = InterruptableThread(target=self.run)
         self._thread.start()
+        cherrypy_subscribe(self)
 
     def stop(self):
         """Halt an asynchronously started processor.
         """
         self._stopOnNoTasks = True
-        self._thread.join(5)
+        self._thread.join(10)
         if self._thread.is_alive():
             class ProcessorStop(Exception):
                 pass
@@ -277,7 +279,7 @@ class Processor(object):
                     oldMonitor = self._monitors.get(tid)
                     if oldMonitor is None or not oldMonitor.isAlive():
                         latestStart = datetime.datetime.utcfromtimestamp(
-                            os.getmtime(path)
+                            os.path.getmtime(path)
                         )
                         self._monitorPid(tid, pid, latestStart)
                 except Exception, e:
