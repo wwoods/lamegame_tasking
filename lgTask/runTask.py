@@ -1,9 +1,9 @@
 
 import traceback
 
-def _runTask(taskClass, taskData, taskConnection):
+def _runTask(taskClass, taskData, taskConnection, processorHome):
     taskId = taskData['_id']
-    logFile = 'logs/' + str(taskId) + '.log'
+    logFile = processorHome + '/logs/' + str(taskId) + '.log'
 
     lastLogMessage = [ "(No log)" ]
     def log(message):

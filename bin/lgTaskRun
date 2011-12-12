@@ -12,11 +12,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(__file__, '../../')))
 import lgTask
 from lgTask.lib.reprconf import Config
 
+global home
 global taskId
 global lastLog
 
 def getLogFile():
-    return 'logs/' + str(taskId) + '.log'
+    return home + '/logs/' + str(taskId) + '.log'
 
 def log(message):
     global lastLog
@@ -27,10 +28,10 @@ def log(message):
 
 def runTask(taskData):
     try:
-        processorConfig = Config('processor.cfg')['processor']
+        processorConfig = Config(home + '/processor.cfg')['processor']
         conn = lgTask.Connection(processorConfig['taskDatabase'])
 
-        taskClasses = lgTask.Processor._getTasksAvailable()
+        taskClasses = lgTask.Processor._getTasksAvailable(home)
         taskClass = taskClasses[taskData['taskClass']]
 
         task = taskClass(
@@ -68,6 +69,7 @@ def runTask(taskData):
 
 if __name__ == '__main__':
     taskId = sys.argv[1]
+    home = sys.argv[2]
     with open(getLogFile(), 'r') as f:
         data = f.readline().strip()
     taskData = json.loads(data, cls=lgTask.processor._JsonDecoder)

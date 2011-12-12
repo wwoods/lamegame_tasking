@@ -47,17 +47,20 @@ class Processor(object):
     NO_TASK_CHECK_INTERVAL__doc = 'Seconds to wait when we are not running ' \
         + 'any tasks and cannot find a new task to run.'
     
-    def __init__(self):
+    def __init__(self, home='.'):
         """Creates a new task processor operating out of the current working
         directory.  Uses processor.cfg as the config file.
+
+        home -- The directory to run the processor out of.
         """
-        self.config = Config("processor.cfg")['processor']
+        self._home = os.path.abspath(home)
+        self.config = Config(self.getPath("processor.cfg"))['processor']
         
         connection = Connection(self.config['taskDatabase'])
         connection._ensureIndexes()
         self.taskConnection = connection
         
-        self._tasksAvailable = self._getTasksAvailable()
+        self._tasksAvailable = self._getTasksAvailable(self._home)
         self._monitors = {}
 
         self._startTaskQueue = Queue()
@@ -67,11 +70,17 @@ class Processor(object):
         error = traceback.format_exc()
         self.log("{0} - {1}".format(message, error))
         
+    def getPath(self, path):
+        """Returns the absolute path for path, taking into account our
+        home directory.
+        """
+        return self._home + '/' + path
+
     def log(self, message):
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.utcnow().isoformat()
         print(message)
-        open('logs/' + self.LOGFILE, 'a').write(
-            "[{0}] - {1}\n".format(now, message)
+        open(self.getPath('logs/' + self.LOGFILE), 'a').write(
+            "[{0}] {1}\n".format(now, message)
         )
         
     def run(self):
@@ -79,22 +88,22 @@ class Processor(object):
         """
 
         # .lock is automatically appended to FileLock (processor.lock)
-        self._lock = lockfile.FileLock('processor')
+        self._lock = lockfile.FileLock(self._home + '/processor')
         try: 
             self._lock.acquire(timeout=0)
         except lockfile.AlreadyLocked:
             raise ProcessorAlreadyRunningError()
         try:
             try:
-                os.makedirs('logs')
+                os.makedirs(self._home + '/logs')
             except OSError:
                 pass
             try:
-                os.makedirs('pids')
+                os.makedirs(self._home + '/pids')
             except OSError:
                 pass
 
-            self.log("Processor started")
+            self.log("Tasks loaded: {0}".format(self._tasksAvailable.keys()))
 
             # The advantage to multiprocessing is that since we are forking
             # the process, our libraries don't need to load again.  This
@@ -111,6 +120,9 @@ class Processor(object):
                 self.log("Using multiprocessing")
             else:
                 self.log("Not using multiprocessing - detected non-main thread")
+
+            self.log("Processor started")
+
 
             # Run the scheduler loop; start with 1 task
             self._startTaskQueue.put('any')
@@ -189,6 +201,7 @@ class Processor(object):
                         self._tasksAvailable[taskData['taskClass']]
                         , taskData
                         , self.taskConnection
+                        , self._home
                     )
                     process = multiprocessing.Process(
                         target=_runTask
@@ -202,7 +215,7 @@ class Processor(object):
                         , '../../bin/lgTaskRun'
                     ))
                     
-                    args = (taskRunner,taskId)
+                    args = (taskRunner,taskId,self._home)
                     process = subprocess.Popen(args)
 
                 # Start was successful, start a PID file and monitor it
@@ -219,20 +232,30 @@ class Processor(object):
                 raise
 
     def _getLogFile(self, tid):
-        return 'logs/' + str(tid) + '.log'
+        return self.getPath('logs/' + str(tid) + '.log')
 
     def _getPidFile(self, tid):
-        return 'pids/' + str(tid) + '.pid'
+        return self.getPath('pids/' + str(tid) + '.pid')
         
     @classmethod
-    def _getTasksAvailable(cls):
+    def _getTasksAvailable(cls, home):
         """Import the "tasks" module, and parse its members for derivation
         from Task.
+
+        home -- Directory to try importing tasks from
         """
         import sys
         oldPath = sys.path[:]
-        sys.path.insert(0, '.')
-        import tasks
+        sys.path.insert(0, home)
+        # This is primarily for testing, but we have to unload tasks if it
+        # is loaded.  Otherwise, the updated sys path will be overlooked as
+        # python will use its cached tasks module.
+        try:
+            del sys.modules['tasks']
+            del tasks
+        except (KeyError, UnboundLocalError):
+            import tasks
+        print("WHAT? " + repr(tasks))
         sys.path.pop(0)
 
         tasksAvailable = {}

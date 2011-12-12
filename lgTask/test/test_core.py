@@ -150,6 +150,16 @@ class TestCore(TestCase):
             { 'state': 'success' }        
         )
         self.assertEqual("Changed from 6 to 7", doc['lastLog'])
+
+    def test_consumeOtherPath(self):
+        db = self.conn._database['test']
+        db.insert({ 'id': 'a', 'value': 3 })
+        self.conn.createTask("IncValueTask2", db=db, id='a')
+        p = lgTask.Processor(home="../testProcessor2")
+        p.start()
+        p.stop()
+
+        self.assertEqual(4, db.find_one({ 'id': 'a' })['value'])
         
     def test_consumeDelayed(self):
         db = self.conn._database['test']
