@@ -133,6 +133,15 @@ class Processor(object):
                 lastTime = self._schedulerAudit(lastTime)
                 try:
                     next = self._startTaskQueue.get(timeout=5)
+                except Empty:
+                    # Timeout, no task start tokens are available.
+                    # Time to run scheduler again.
+                    # For now, we can safely assume that this always means that
+                    # any tasks running are long-running, and can grab a new 
+                    # token.
+                    self._startTaskQueue.put('any')
+                else:
+                    # We got a token, OK to start a new task
                     result = self._consume()
                     if not result:
                         if self._stopOnNoTasks:
@@ -140,9 +149,6 @@ class Processor(object):
                         elif len(self._monitors) == 0:
                             time.sleep(self.NO_TASK_CHECK_INTERVAL)
                             self._startTaskQueue.put('any')
-                except Empty:
-                    # Timeout; time to run scheduler again, but OK
-                    pass
         finally:
             self._lock.release()
 
