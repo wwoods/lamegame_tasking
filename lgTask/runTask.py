@@ -1,4 +1,5 @@
 
+import datetime
 import traceback
 
 def _runTask(taskClass, taskData, taskConnection, processorHome):
@@ -7,10 +8,13 @@ def _runTask(taskClass, taskData, taskConnection, processorHome):
 
     lastLogMessage = [ "(No log)" ]
     def log(message):
+        now = datetime.datetime.utcnow().isoformat() + 'Z'
         lastLogMessage[0] = message
-        print(message)
+
+        showAs = now + ' ' + message
+        print(showAs)
         with open(logFile, 'a') as f:
-            f.write(message + '\n')
+            f.write(showAs + '\n')
 
     try:
         conn = taskConnection

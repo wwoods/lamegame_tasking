@@ -21,10 +21,12 @@ def getLogFile():
 
 def log(message):
     global lastLog
+    now = datetime.datetime.utcnow().isoformat() + 'Z'
     lastLog = message
-    print(message)
+    showAs = now + ' ' + message
+    print(showAs)
     with open(getLogFile(), 'a') as f:
-        f.write(message + '\n')
+        f.write(showAs + '\n')
 
 def runTask(taskData):
     try:
