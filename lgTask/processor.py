@@ -88,6 +88,9 @@ class Processor(object):
         The fork is automatically registered with an atexit to terminate the
         forked Processor.  Look at lamegame_tasking/bin/lgTaskProcessor for
         a standalone script.
+
+        Returns the function that is already registered with atexit, but may
+        be called manually if you need to kill the fork.
         """
         runProcess = os.path.abspath(os.path.join(
             __file__
@@ -96,6 +99,7 @@ class Processor(object):
         args = (sys.executable, runProcess, home)
         proc = subprocess.Popen(args)
         atexit.register(proc.terminate)
+        return proc.terminate
         
     def getPath(self, path):
         """Returns the absolute path for path, taking into account our
