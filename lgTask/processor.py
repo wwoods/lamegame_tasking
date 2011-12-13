@@ -94,7 +94,6 @@ class Processor(object):
             , '../../bin/lgTaskProcessor'
         ))
         args = (sys.executable, runProcess, home)
-        print("LAUNCHING {0} OUT OF {1}".format(args, os.getcwd()))
         proc = subprocess.Popen(args)
         atexit.register(proc.terminate)
         
