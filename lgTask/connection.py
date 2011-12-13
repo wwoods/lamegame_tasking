@@ -59,6 +59,10 @@ class Connection(object):
     
     bindingsEncode = [ _encodePyMongo ]
     bindingsDecode = [ _decodePyMongo ]
+
+    def _getDatabase(self):
+        return self._database
+    database = property(_getDatabase)
     
     def __init__(self, connString, **kwargs):
         if isinstance(connString, pymongo.database.Database):
