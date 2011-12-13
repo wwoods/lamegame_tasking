@@ -3,15 +3,18 @@
 import os
 import sys
 import socket
+import lgTask
 
 if __name__ == '__main__':
     if sys.argv[1] in ('--help', '-h'):
         print("Usage: {0} [/path/to/home]".format(sys.argv[0]))
         sys.exit(1)
-    if len(sys.argv) > 1:
-        os.chdir(sys.argv[1])
 
-    proc = lgTask.Processor()
+    home = '.'
+    if len(sys.argv) > 1:
+        home = sys.argv[1]
+
+    proc = lgTask.Processor(home)
     proc.run()
 
 

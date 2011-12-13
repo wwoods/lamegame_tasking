@@ -118,11 +118,11 @@ Configuring and running processors for production:
 
 2. Setup a configuration file for your deployment, like the following (myAppProcessor.cfg):
 
-[taskProcessor] # This name is required; on the bright side, this allows you
+[processor] # This name is required; on the bright side, this allows you
                 # to put other configuration items in the file
 taskDatabase = 'mongodb://[user:password]@server:port[/mytaskdb]'
-taskDir = '/home/user/myAppTasks'
-[taskName = name [defaults to hostname]]
+pythonPath = [ '../' ] # Folders relative to config file to add to python path
+                       # when running the Processor.
 
 3. Setup cron to run lgTaskProcessor every minute (to prevent it from erroring out; a processor will automatically not run two instances) with the following parameters:
   a. Config file - absolute path to task processor configuration

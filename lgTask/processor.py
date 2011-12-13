@@ -1,4 +1,5 @@
 
+import atexit
 import datetime
 import imp
 import inspect
@@ -15,7 +16,6 @@ import time
 import traceback
 from lgTask import Connection, Task, _runTask
 from lgTask.errors import ProcessorAlreadyRunningError
-from lgTask.lib.compat import cherrypy_subscribe
 from lgTask.lib.interruptableThread import InterruptableThread
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
@@ -56,10 +56,17 @@ class Processor(object):
         """
         self._home = os.path.abspath(home)
         self.config = Config(self.getPath("processor.cfg"))['processor']
-        
+
         connection = Connection(self.config['taskDatabase'])
         connection._ensureIndexes()
         self.taskConnection = connection
+        
+        # Add other path elements before trying imports
+        for i,path in enumerate(self.config.get('pythonPath', [])):
+            sys.path.insert(
+                i
+                , os.path.abspath(os.path.join(home, path))
+            )
         
         self._tasksAvailable = self._getTasksAvailable(self._home)
         self._monitors = {}
@@ -70,6 +77,26 @@ class Processor(object):
     def error(self, message):
         error = traceback.format_exc()
         self.log("{0} - {1}".format(message, error))
+
+    @classmethod
+    def fork(cls, home='.'):
+        """Forks a new subprocess to run a Processor instance out of the
+        given home directory.  Useful for e.g. debug environments, where the
+        main script should also spawn a processor but perhaps does something
+        else, like serving webpages.
+
+        The fork is automatically registered with an atexit to terminate the
+        forked Processor.  Look at lamegame_tasking/bin/lgTaskProcessor for
+        a standalone script.
+        """
+        runProcess = os.path.abspath(os.path.join(
+            __file__
+            , '../../bin/lgTaskProcessor'
+        ))
+        args = (sys.executable, runProcess, home)
+        print("LAUNCHING {0} OUT OF {1}".format(args, os.getcwd()))
+        proc = subprocess.Popen(args)
+        atexit.register(proc.terminate)
         
     def getPath(self, path):
         """Returns the absolute path for path, taking into account our
@@ -158,7 +185,6 @@ class Processor(object):
         self.NO_TASK_CHECK_INTERVAL = 0.01
         self._thread = InterruptableThread(target=self.run)
         self._thread.start()
-        cherrypy_subscribe(self)
 
     def stop(self):
         """Halt an asynchronously started processor.
