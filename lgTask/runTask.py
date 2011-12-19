@@ -1,6 +1,7 @@
 
 import datetime
 import traceback
+from lgTask.errors import RetryTaskError
 
 def _runTask(taskClass, taskData, taskConnection, processorHome):
     taskId = taskData['_id']
@@ -40,6 +41,9 @@ def _runTask(taskClass, taskData, taskConnection, processorHome):
             if success is None:
                 # No return value means success
                 success = True
+        except RetryTaskError, e:
+            log("Retrying task after {0}".format(e.delay))
+            success = e
         except Exception, e:
             log("Unhandled exception: " + traceback.format_exc())
             success = False

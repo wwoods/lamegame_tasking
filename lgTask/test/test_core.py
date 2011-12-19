@@ -286,6 +286,31 @@ class TestCore(TestCase):
         except TaskKwargError:
             self.fail('Did raise TaskKwargError on identical task')
 
+    def test_retryTask(self):
+        taskDb = self.conn._database[self.conn.TASK_COLLECTION]
+
+        p = lgTask.Processor()
+        p.start()
+        try:
+            self.conn.createTask('FailTask', maxRetries=2)
+            time.sleep(0.5) # First one failed
+            self.assertEqual(0, taskDb.find({ 'state': 'error' }).count())
+            self.assertEqual(1, taskDb.find({ 'state': 'retried' }).count())
+            time.sleep(1) #Second failed
+            self.assertEqual(0, taskDb.find({ 'state': 'error' }).count())
+            self.assertEqual(2, taskDb.find({ 'state': 'retried' }).count())
+            time.sleep(1) #Third failure, not retried
+            self.assertEqual(1, taskDb.find({ 'state': 'error' }).count())
+            self.assertEqual(2, taskDb.find({ 'state': 'retried' }).count())
+            self.assertEqual(
+                0
+                , taskDb
+                    .find({ 'state': { '$nin': [ 'error', 'retried' ] } })
+                    .count()
+            )
+        finally:
+            p.stop()
+
     def test_scheduleAudit(self):
         taskDb = self.conn._database[self.conn.TASK_COLLECTION]
 

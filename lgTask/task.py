@@ -46,6 +46,23 @@ class Task(object):
         """Logs the given message with this task.
         """
         self._logs.append(message)
+
+    def retryTask(self, delay, maxRetries):
+        """Should be called right before a task is about to fail.  Runs a 
+        delayed task with the exact same arguments as the current one, with
+        the caveat that it will not retry more than maxRetries times (since
+        that could end up with an infinite loop).
+
+        This function works by raising a RetryTaskError - if caught, the retry
+        will not work.
+
+        Raises an Exception if maxRetries is met.
+        """
+        retryCount = self.taskData.get('retry', 0)
+        if retryCount >= maxRetries:
+            raise Exception("Not retrying - at {0} retries".format(retryCount))
+        else:
+            raise RetryTaskError(delay)
         
     def start(self, **kwargs):
         """Starts the task with the given kwargs (calls the Task class' run()

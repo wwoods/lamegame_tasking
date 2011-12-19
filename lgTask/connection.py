@@ -53,9 +53,10 @@ class Connection(object):
         REQUEST = 'request'
         WORKING = 'working'
         SUCCESS = 'success'
+        RETRIED = 'retried'
         ERROR = 'error'
         NOT_STARTED_GROUP = [ 'request' ]
-        DONE_GROUP = [ 'success', 'error' ]
+        DONE_GROUP = [ 'success', 'retried', 'error' ]
     
     bindingsEncode = [ _encodePyMongo ]
     bindingsDecode = [ _decodePyMongo ]
@@ -294,30 +295,30 @@ class Connection(object):
             } }
         )
         
-    def taskStopped(self, taskOrId, success, lastLog):
+    def taskStopped(self, task, success, lastLog):
         """Update the database noting that a task has stopped.  Must be callable
         multiple times; see Task._finished.
         
-        taskOrId - the task or ID being stopped
+        task - the Task being stopped
         
-        success - True for success, False for error
+        success - True for success, False for error.  May also be an instance
+            of RetryTaskError for a retry.
         
         lastLog - The last log message.
         """
         c = self._database[self.TASK_COLLECTION]
-        if not isinstance(taskOrId, basestring):
-            task = taskOrId
-            taskId = task.taskId
-        else:
-            task = None
-            taskId = taskOrId
+        taskId = task.taskId
 
         now = datetime.utcnow()
         finishUpdates = {
-            'state': 'success' if success else 'error'
-            , 'tsStop': now
+            'tsStop': now
             , 'lastLog': lastLog
         }
+        if isinstance(success, RetryTaskError):
+            self._retryTask(task, success.delay)
+            finishUpdates['state'] = self.states.RETRIED
+        else:
+            finishUpdates['state'] = 'success' if success else 'error'
 
         if \
             task is not None \
@@ -546,6 +547,20 @@ class Connection(object):
                     break
             kwargsEncoded[key] = newValue
         return kwargsEncoded
+
+    def _retryTask(self, task, delay):
+        """Queue up an identical version of task after delay time.
+        """
+        now = datetime.utcnow()
+        runAt = self._getRunAtTime(now, delay)
+
+        taskArgs = {
+          'tsRequest': runAt
+          , 'retry': task.taskData.get('retry', 0) + 1
+        }
+        taskClass = task.taskData['taskClass']
+        kwargs = task._kwargsOriginal
+        self._createTask(now, taskClass, taskArgs, kwargs)
 
     def _scheduleGetNextRunTime(self, scheduleId, taskStart, taskStop):
         """Given the provided scheduler identifier, task working start time,
