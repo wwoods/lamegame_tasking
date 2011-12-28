@@ -120,6 +120,19 @@ class TestCore(TestCase):
         # OK since the name should be derived from kwargs
         self.conn.batchTask('1 second', 'IncValueTask', id='a')
         self.conn.batchTask('1 second', 'IncValueTask', id='b')
+
+    def test_batchRunOnError(self):
+        # See if a previously failed batch task allows a new one to run.
+        taskDb = self.conn.database[self.conn.TASK_COLLECTION]
+        taskDb.insert({
+            '_id': 'IncValueTask-k'
+            ,'taskClass': 'IncValueTask'
+            ,'state': 'success'
+            ,'kwargs': { 'id': 'a' }
+        })
+        self.conn.batchTask('1 second', 'IncValueTask', id='a', taskName='k')
+        newTask = taskDb.find_one({ '_id': 'IncValueTask-k' })
+        self.assertEqual('request', newTask['state'])
     
     def test_consumeOne(self):
         db = self.conn._database['test']

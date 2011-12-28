@@ -117,10 +117,36 @@ class Connection(object):
                     { '_id': taskName, 'tsRequest': oldRunAt }
                     , { '$set': { 'tsRequest': runAt } }
                 )
+        elif existing and existing['state'] in self.states.DONE_GROUP:
+            # Already existing, but finished.  This is an error state, since
+            # batch tasks should change their ID on completion.  However, we
+            # want to handle this gracefully, so overwrite it with a requested
+            # task.
+            r = taskColl.find_and_modify(
+                { '_id': taskName, 'state': existing['state'] }
+                , { '$set': {
+                    'state': 'request'
+                    , 'tsRequest': runAt
+                }}
+                , { '_id': 1 }
+            )
+
+            if r is None:
+                # New state?  Try to see if there's an existing request, and 
+                # overwrite if we run before them
+                taskColl.update(
+                    { 
+                        '_id': taskName
+                        , 'state': 'request'
+                        , 'tsRequest': { '$gt': runAt }
+                    }
+                    , { '$set': {
+                        'tsRequest': runAt
+                    }}
+                )
         elif existing and runAt < (existing.get('batchQueued') or datetime.max):
             # Already an existing task, but it's running; tell it to 
             # reschedule when finished.
-            print("SETTING batchQueued TO " + str(runAt))
             r = taskColl.find_and_modify(
                 { '_id': taskName }
                 , { '$set': { 'batchQueued': runAt } }
