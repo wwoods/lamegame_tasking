@@ -294,7 +294,7 @@ class Processor(object):
             import tasks
         sys.path.pop(0)
 
-        tasksAvailable = {}
+        tasksAvailable = { 'ScheduleAuditTask': ScheduleAuditTask }
         for name, obj in inspect.getmembers(tasks):
             if inspect.isclass(obj) and issubclass(obj, Task):
                 tasksAvailable[name] = obj

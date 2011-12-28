@@ -187,6 +187,9 @@ class Connection(object):
         }
         kwargs = self._kwargsEncode(kwargs)
         self._createTask(now, taskClass, taskArgs, kwargs)
+
+    def getNewId(self):
+        return uuid.uuid4().hex
         
     def intervalTask(self, interval, taskClass, fromStart=False, **kwargs):
         """Schedule (or assert that a schedule exists for) a task to be
@@ -341,8 +344,14 @@ class Connection(object):
             , 'lastLog': lastLog
         }
         if isinstance(success, RetryTaskError):
-            self._retryTask(task, success.delay)
-            finishUpdates['state'] = self.states.RETRIED
+            try:
+                self._retryTask(task, success.delay)
+                finishUpdates['state'] = self.states.RETRIED
+            except Exception, e:
+                # We still want to mark end state, etc.
+                finishUpdates['state'] = 'error'
+                finishUpdates['lastLog'] = 'Tried to retry; got exception: {0}'\
+                    .format(e)
         else:
             finishUpdates['state'] = 'success' if success else 'error'
 
@@ -365,10 +374,7 @@ class Connection(object):
                 if taskData[0] is None:
                     taskData[0] = c.find_one({ '_id': taskId })
                 if not reinserted[0]:
-                    try:
-                        del taskData[0]['_id']
-                    except KeyError:
-                        pass
+                    taskData[0]['_id'] = self.getNewId()
                     taskData[0].update(finishUpdates)
                     reinserted[0] = c.insert(taskData[0], safe=True)
                 if not deletedData[0]:
@@ -449,7 +455,7 @@ class Connection(object):
         taskDefaultArgs.update(taskArgs)
 
         if '_id' not in taskDefaultArgs:
-            taskDefaultArgs['_id'] = uuid.uuid4().hex
+            taskDefaultArgs['_id'] = self.getNewId()
 
         taskColl = self._database[self.TASK_COLLECTION]
         taskColl.insert(taskDefaultArgs)

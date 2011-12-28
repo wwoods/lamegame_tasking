@@ -14,6 +14,17 @@ class ScheduleAuditTask(Task):
         tDb = tc._database[tc.TASK_COLLECTION]
 
         for d in sDb.find():
-            if tDb.find_one({ '_id': d['_id'] }) is None:
+            oldTask = tDb.find_one({ '_id': d['_id'] })
+            if oldTask is not None and oldTask['state'] in tc.states.DONE_GROUP:
+                # Task is in invalid state; move it and reschedule.
+                # State is invalid because tasks should change their ID on
+                # completion.  But, we want to handle this semi-gracefully.
+                oldTask['_id'] = tc.getNewId()
+                tDb.insert(oldTask, safe=True)
+                tDb.remove(d['_id'], safe=True)
+                oldTask = None
+
+            if oldTask is None:
+                # Reschedule the task
                 tc._scheduleRestartTask(d['_id'])
 
