@@ -1,11 +1,15 @@
 
 import datetime
 import traceback
+import os
 from lgTask.errors import RetryTaskError
 
 def _runTask(taskClass, taskData, taskConnection, processorHome):
+    def getLogForId(id):
+        return processorHome + '/logs/' + str(id) + '.log'
+
     taskId = taskData['_id']
-    logFile = processorHome + '/logs/' + str(taskId) + '.log'
+    logFile = getLogForId(taskId)
 
     lastLogMessage = [ "(No log)" ]
     def log(message):
@@ -48,6 +52,8 @@ def _runTask(taskClass, taskData, taskConnection, processorHome):
             log("Unhandled exception: " + traceback.format_exc())
             success = False
         finally:
-            conn.taskStopped(task, success, lastLogMessage[0])
+            def moveLogFile(newId):
+                os.rename(logFile, getLogForId(newId))
+            conn.taskStopped(task, success, lastLogMessage[0], moveLogFile)
 
 

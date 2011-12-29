@@ -121,6 +121,22 @@ class TestCore(TestCase):
         self.conn.batchTask('1 second', 'IncValueTask', id='a')
         self.conn.batchTask('1 second', 'IncValueTask', id='b')
 
+    def test_batchMoveLog(self):
+        self.conn.batchTask('now', 'IncValueTask', taskName='j', id='c')
+        startTime = datetime.datetime.utcnow()
+        p = lgTask.Processor()
+        p.start()
+        try:
+            time.sleep(0.5)
+            taskDb = self.conn.database[self.conn.TASK_COLLECTION]
+            task = taskDb.find_one({ 'taskClass': 'IncValueTask' })
+            tid = task['_id']
+            self.assertNotEqual('IncValueTask-j', tid)
+            self.assertTrue(task['tsStop'] >= startTime, "Wrong task")
+            self.assertTrue(os.path.isfile('logs/{0}.log'.format(tid)))
+        finally:
+            p.stop()
+
     def test_batchRunOnError(self):
         # See if a previously failed batch task allows a new one to run.
         taskDb = self.conn.database[self.conn.TASK_COLLECTION]

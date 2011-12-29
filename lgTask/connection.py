@@ -324,7 +324,7 @@ class Connection(object):
             } }
         )
         
-    def taskStopped(self, task, success, lastLog):
+    def taskStopped(self, task, success, lastLog, moveIdCallback):
         """Update the database noting that a task has stopped.  Must be callable
         multiple times; see Task._finished.
         
@@ -334,6 +334,9 @@ class Connection(object):
             of RetryTaskError for a retry.
         
         lastLog - The last log message.
+
+        moveIdCallback - called when a batch task gets its id moved with the
+            new ID as an argument.  Used to keep logs associated with ids.
         """
         c = self._database[self.TASK_COLLECTION]
         taskId = task.taskId
@@ -376,7 +379,9 @@ class Connection(object):
                 if not reinserted[0]:
                     taskData[0]['_id'] = self.getNewId()
                     taskData[0].update(finishUpdates)
-                    reinserted[0] = c.insert(taskData[0], safe=True)
+                    reinsertedOk = c.insert(taskData[0], safe=True)
+                    moveIdCallback(taskData[0]['_id'])
+                    reinserted[0] = reinsertedOk
                 if not deletedData[0]:
                     # In case anything (specifically batchQueued) changed
                     # while we were copying the record, we want to atomically
