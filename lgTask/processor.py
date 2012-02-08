@@ -172,7 +172,13 @@ class Processor(object):
                     self._startTaskQueue.put('any')
                 else:
                     # We got a token, OK to start a new task
-                    result = self._consume()
+                    try:
+                        result = self._consume()
+                    except:
+                        # _consume has its own error logging; just wait and
+                        # retry.
+                        time.sleep(self.NO_TASK_CHECK_INTERVAL)
+                        result = False
                     if not result:
                         if self._stopOnNoTasks:
                             break

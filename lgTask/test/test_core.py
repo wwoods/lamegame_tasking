@@ -149,6 +149,26 @@ class TestCore(TestCase):
         self.conn.batchTask('1 second', 'IncValueTask', id='a', taskName='k')
         newTask = taskDb.find_one({ '_id': 'IncValueTask-k' })
         self.assertEqual('request', newTask['state'])
+
+    def test_consumeError(self):
+        # Test that an error in processor consume does not block the processor.
+        # This is a regression test
+        crashCount = [ 0 ]
+        def crash():
+            crashCount[0] += 1
+            raise Exception("crash()")
+        p = lgTask.Processor()
+        c = p._consume
+        p._consume = crash
+
+        db = self.conn._database['test']
+        db.insert({ 'id': 'a', 'value': 99 })
+
+        p.start()
+        time.sleep(0.1)
+        p.stop()
+
+        self.assertTrue(crashCount[0] > 1, '_consume() called at most once')
     
     def test_consumeOne(self):
         db = self.conn._database['test']
