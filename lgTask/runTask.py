@@ -9,7 +9,9 @@ try:
     from setproctitle import getproctitle, setproctitle
     def setProcessTitle(task):
         """Set the process title so that this process is indentifiable."""
-        setproctitle(getproctitle() + " task-" + str(task.taskId))
+        newTitle = getproctitle() + " task-" + str(task.taskId)
+        setproctitle(newTitle)
+        task.log("Set process title - " + newTitle)
 except ImportError:
     def setProcessTitle(task):
         task.log("Could not set process title - easy_install setproctitle")
