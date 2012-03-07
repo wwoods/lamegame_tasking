@@ -9,7 +9,7 @@ try:
     from setproctitle import getproctitle, setproctitle
     def setProcessTitle(task):
         """Set the process title so that this process is indentifiable."""
-        newTitle = getproctitle() + " task-" + str(task.taskId)
+        newTitle = getproctitle() + " " + str(task.taskId)
         setproctitle(newTitle)
         task.log("Set process title - " + newTitle)
 except ImportError:
