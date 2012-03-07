@@ -8,6 +8,7 @@ import lockfile
 import multiprocessing
 from Queue import Empty, Queue
 import os
+import site
 import socket
 import subprocess
 import sys
@@ -89,14 +90,22 @@ class Processor(object):
         forked Processor.  Look at lamegame_tasking/bin/lgTaskProcessor for
         a standalone script.
 
+        Automatically forwards site.ENABLE_USER_SITE to forked interpreter.
+
         Returns the function that is already registered with atexit, but may
         be called manually if you need to kill the fork.
         """
+        hasS = ('-s' in sys.argv)
         runProcess = os.path.abspath(os.path.join(
             __file__
             , '../../bin/lgTaskProcessor'
         ))
-        args = (sys.executable, runProcess, home)
+        args = [ sys.executable ]
+        # site.ENABLE_USER_SITE tells us if, for instance, -s was passed
+        if not site.ENABLE_USER_SITE:
+            args.append('-s')
+        args.extend([ runProcess, home ])
+        args = tuple(args)
         proc = subprocess.Popen(args)
         atexit.register(proc.terminate)
         return proc.terminate
