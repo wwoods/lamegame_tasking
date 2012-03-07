@@ -103,8 +103,9 @@ class Connection(object):
 
         if existing:
             # Double check kwarg match or we have another problem
-            if kwargs != existing['kwargs']:
-                raise TaskKwargError("Didn't match existing scheduled batch")
+            if kwargs != existing.get('kwargs'):
+                raise TaskKwargError("Didn't match existing scheduled "
+                    + "batch - {0} -- {1}".format(taskName, existing))
 
         if existing and existing['state'] in self.states.NOT_STARTED_GROUP:
             # Already an existing task; update the request time if we need to

@@ -4,6 +4,17 @@ import traceback
 import os
 from lgTask.errors import RetryTaskError
 
+try:
+    # Use setproctitle if available to give us a task ID
+    from setproctitle import getproctitle, setproctitle
+    def setProcessTitle(task):
+        """Set the process title so that this process is indentifiable."""
+        setproctitle(getproctitle() + " task-" + str(task.taskId))
+except ImportError:
+    def setProcessTitle(task):
+        task.log("Could not set process title - easy_install setproctitle")
+
+
 def _runTask(taskClass, taskData, taskConnection, processorHome):
     def getLogForId(id):
         return processorHome + '/logs/' + str(id) + '.log'
@@ -36,6 +47,7 @@ def _runTask(taskClass, taskData, taskConnection, processorHome):
         success = True
         try:
             task.log = log
+            setProcessTitle(task)
             if task.DEBUG_TIMING:
                 log("Starting task at {0}".format(
                     datetime.datetime.utcnow().isoformat()
