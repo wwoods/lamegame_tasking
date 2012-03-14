@@ -157,8 +157,15 @@ class Processor(object):
         args.extend([ runProcess, home ])
         args = tuple(args)
         proc = subprocess.Popen(args)
-        atexit.register(proc.terminate)
-        return proc.terminate
+        def terminateProc():
+            # We have to both terminate AND wait, or we'll get defunct
+            # processes lying around
+            if proc.poll() is None:
+                # Process is still running
+                proc.terminate()
+            proc.wait()
+        atexit.register(terminateProc)
+        return terminateProc
         
     def getPath(self, path):
         """Returns the absolute path for path, taking into account our
@@ -209,7 +216,7 @@ class Processor(object):
             else:
                 self.log("Not using multiprocessing - detected non-main thread")
 
-            self.log("Processor started")
+            self.log("Processor started - pid " + str(os.getpid()))
 
 
             # Run the scheduler loop; start with 1 task

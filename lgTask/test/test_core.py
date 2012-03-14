@@ -6,6 +6,7 @@ import os
 import pymongo
 import shutil
 import time
+import traceback
 from unittest import TestCase, skip
 
 import lgTask
@@ -16,9 +17,10 @@ from lgTask.lib.timeInterval import TimeInterval
 class TestCore(TestCase):
     def setUp(self):
         self.oldpath = os.getcwd()
-        os.chdir(os.path.abspath(
+        self.newpath = os.path.abspath(
             os.path.join(__file__, '../testProcessor')
-        ))
+        )
+        self._fudgePath()
 
         try:
             pass#shutil.rmtree('logs')
@@ -39,8 +41,14 @@ class TestCore(TestCase):
         self.conn._database.drop_collection(self.conn.TASK_COLLECTION)
         self.conn._database.drop_collection(self.conn.SCHEDULE_COLLECTION)
 
-    def tearDown(self):
+    def _restorePath(self):
         os.chdir(self.oldpath)
+
+    def _fudgePath(self):
+        os.chdir(self.newpath)
+
+    def tearDown(self):
+        self._restorePath()
 
     def test_batch(self):
         p = lgTask.Processor()
@@ -391,6 +399,27 @@ class TestCore(TestCase):
             pass
         finally:
             p.stop()
+
+    def test_processorForkNotDefunct(self):
+        # Run a forked processor, kill it, and make sure that the processor
+        # lock has been released appropriately (a new processor can spawn).
+        pkill = lgTask.Processor.fork(self.newpath)
+        time.sleep(1)
+        # Try to get a lock, ensure it's running and got lock
+        p = lgTask.Processor()
+        try:
+            p._stopOnNoTasks = True
+            p.run()
+            self.fail("fork either failed or did not get lock")
+        except lgTask.errors.ProcessorAlreadyRunningError:
+            pass
+        pkill()
+
+        p = lgTask.Processor()
+        p._stopOnNoTasks = True
+        # If this raises ProcessorAlreadyRunningError, then the fork probably
+        # didn't release its lock on termination.
+        p.run()
 
     @skip("Max tasks not currently implemented")
     def test_processorMaxTasks(self):

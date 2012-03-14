@@ -3,6 +3,9 @@
 import os
 import sys
 import socket
+
+# Ensure that OUR lgTask implementation has precedence
+sys.path.insert(0, os.path.abspath(os.path.join(__file__, '../..')))
 import lgTask
 
 if __name__ == '__main__':
