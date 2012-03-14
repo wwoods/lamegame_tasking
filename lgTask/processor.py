@@ -1,10 +1,10 @@
 
 import atexit
 import datetime
+import errno
 import imp
 import inspect
 import json
-import lockfile
 import multiprocessing
 from Queue import Empty, Queue
 import os
@@ -37,6 +37,56 @@ class _JsonDecoder(json.JSONDecoder):
 
         # Fallback
         return json.JSONDecoder.default(self, s)
+
+
+class ProcessorLock(object):
+    """Tests against a lock folder with the given name."""
+
+    def __init__(self, path):
+        self._path = os.path.abspath(path)
+
+
+    def acquire(self):
+        """Raises a ProcessorAlreadyRunningError if cannot be acquired
+        """
+        try:
+            os.makedirs(self._path)
+        except OSError, e:
+            if e.errno != errno.EEXIST:
+                raise
+            else:
+                pid = open(self._getPidFile(), 'r').read()
+                if os.path.exists('/proc/' + pid):
+                    raise ProcessorAlreadyRunningError()
+                else:
+                    self.release(force = True)
+                    return self.acquire()
+        else:
+            with open(self._getPidFile(), 'w') as f:
+                f.write(str(os.getpid()))
+
+
+    def release(self, force = True):
+        """Releases the lock if the lock belongs to this process or force is
+        True.  Silently does not release the lock if it belongs to another
+        process.
+        """
+        try:
+            pid = open(self._getPidFile(), 'r').read()
+        except OSError, e:
+            # If no pid file, ok
+            if e.errno != errno.ENOENT:
+                raise
+        else:
+            if pid == os.getpid() or force:
+                # Clear it out!
+                os.remove(self._getPidFile())
+                os.rmdir(self._path)
+
+
+    def _getPidFile(self):
+        """Returns the absolute path to this lock's pid file."""
+        return os.path.join(self._path, 'lock.pid')
 
 
 class Processor(object):
@@ -128,11 +178,9 @@ class Processor(object):
         """
 
         # .lock is automatically appended to FileLock (processor.lock)
-        self._lock = lockfile.FileLock(self._home + '/processor')
-        try: 
-            self._lock.acquire(timeout=0)
-        except lockfile.AlreadyLocked:
-            raise ProcessorAlreadyRunningError()
+        self._lock = ProcessorLock(self._home + '/.processor.lock')
+        # raises ProcessorAlreadyRunningError on fail
+        self._lock.acquire()
         try:
             try:
                 os.makedirs(self._home + '/logs')
@@ -391,7 +439,7 @@ class Processor(object):
                 except Exception, e:
                     self.log(
                         "Monitor exception in end for {0}:{1} - {2}".format(
-                            tid, pid, e
+                            tid, pid, e.__class__.__name__ + ': ' + str(e)
                         )
                     )
                 break
