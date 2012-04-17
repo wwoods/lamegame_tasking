@@ -74,7 +74,7 @@ class Connection(object):
             raise ValueError("Unrecognized connString: {0}".format(connString))
 
 
-    def batchTask(self, runAt, taskClass, **kwargs):
+    def batchTask(self, runAt, taskClass, priority=0, **kwargs):
         """Runs a task after a period of time; does not re-add this task
         if a task already exists.  Uses either taskName from kwargs or a
         combination of taskClass and kwargs to distinguish batches.
@@ -103,7 +103,8 @@ class Connection(object):
 
         if existing:
             # Double check kwarg match or we have another problem
-            if kwargs != existing.get('kwargs'):
+            if kwargs != existing.get('kwargs') \
+                or priority != existing.get('priority', 0):
                 raise TaskKwargError("Didn't match existing scheduled "
                     + "batch - {0} -- {1}".format(taskName, existing))
 
@@ -164,18 +165,19 @@ class Connection(object):
                 '_id': taskName
                 , 'tsRequest': runAt 
                 , 'batch': True
+                , 'priority': priority
             }
             self._createTask(now, taskClass, taskArgs, kwargs)
 
         
-    def createTask(self, taskClass, **kwargs):
+    def createTask(self, taskClass, priority=0, **kwargs):
         """Creates a task to be executed immediately.
         """
         now = datetime.utcnow()
         kwargs = self._kwargsEncode(kwargs)
-        self._createTask(now, taskClass, {}, kwargs)
+        self._createTask(now, taskClass, { 'priority': priority }, kwargs)
 
-    def delayedTask(self, runAt, taskClass, **kwargs):
+    def delayedTask(self, runAt, taskClass, priority=0, **kwargs):
         """Creates a task that runs after a given period of time, or at 
         a specific UTC datetime.
         """
@@ -185,6 +187,7 @@ class Connection(object):
 
         taskArgs = {
           'tsRequest': runAt
+          , 'priority': priority
         }
         kwargs = self._kwargsEncode(kwargs)
         self._createTask(now, taskClass, taskArgs, kwargs)
@@ -192,7 +195,8 @@ class Connection(object):
     def getNewId(self):
         return uuid.uuid4().hex
         
-    def intervalTask(self, interval, taskClass, fromStart=False, **kwargs):
+    def intervalTask(self, interval, taskClass, fromStart=False
+        , priority=0, **kwargs):
         """Schedule (or assert that a schedule exists for) a task to be
         executed at the given interval.
 
@@ -236,6 +240,7 @@ class Connection(object):
                 taskClass != old['taskClass'] \
                 or kwargs != old['kwargs'] \
                 or schedule != old['schedule'] \
+                or priority != old.get('priority', 0) \
                 :
                 raise TaskKwargError(
                     ("Scheduled task with name {0} already "
@@ -253,6 +258,7 @@ class Connection(object):
                     , 'kwargs': kwargs
                     , 'schedule': schedule
                     , 'taskClass': taskClass
+                    , 'priority': priority
                 }
                 , safe=True
             )
@@ -267,6 +273,7 @@ class Connection(object):
         taskArgs = { 
             '_id': taskName
             , 'schedule': True
+            , 'priority': priority
         }
         self._createTask(now, taskClass, taskArgs, kwargs)
 
@@ -283,7 +290,7 @@ class Connection(object):
         c = self._database[self.TASK_COLLECTION]
         now = datetime.utcnow()
         taskData = c.find_and_modify(
-            { 
+            {
                 'taskClass': { '$in': availableTasks.keys() }
                 , 'state': 'request'
                 , 'tsRequest': { '$lte': now }
@@ -294,6 +301,7 @@ class Connection(object):
                 , 'host': socket.gethostname()
             }}
             , new = True
+            , sort = [ ('priority', -1), ('tsRequest', -1) ]
         )
 
         return taskData
@@ -398,6 +406,7 @@ class Connection(object):
                         '_id': taskId
                         , 'batch': True 
                         , 'tsRequest': deletedData[0]['batchQueued']
+                        , 'priority': deletedData[0].get('priority', 0)
                     }
                     # Even if this gets run twice, it's fine since we 
                     # have a specific ID; only one task will be created.
@@ -416,6 +425,7 @@ class Connection(object):
                             '_id': taskId
                             , 'schedule': True
                             , 'tsRequest': nextTime
+                            , 'priority': deletedData[0].get('priority', 0)
                         }
                         # Same as with batchQueued; OK to run twice since we use
                         # _id.
@@ -454,6 +464,7 @@ class Connection(object):
             ,'tsStart': None
             ,'tsStop': None
             ,'state': 'request'
+            ,'priority': 0
             ,'taskClass': taskClass
             ,'kwargs': kwargsEncoded
         }
@@ -499,7 +510,13 @@ class Connection(object):
         to maintain performance.  Typically called by a Processor.
         """
         db = self._database[self.TASK_COLLECTION]
-        db.ensure_index( [ ('state', 1), ( 'taskClass', 1), ( 'tsRequest', -1 ) ] )
+        try:
+            # Get rid of old index
+            db.drop_index([ ('state', 1), ('taskClass', 1), ('tsRequest', -1) ])
+        except pymongo.errors.OperationFailure:
+            pass
+
+        db.ensure_index([ ('state', 1), ('priority', -1), ('tsRequest', -1) ])
 
     def _getRunAtTime(self, utcNow, runAt):
         """Changes a runAt variable that might be an interval or datetime,
@@ -595,6 +612,7 @@ class Connection(object):
         taskArgs = {
           'tsRequest': runAt
           , 'retry': task.taskData.get('retry', 0) + 1
+          , 'priority': task.taskData.get('priority', 0)
         }
         taskClass = task.taskData['taskClass']
         kwargs = task._kwargsOriginal
@@ -650,6 +668,7 @@ class Connection(object):
             '_id': scheduleId
             , 'schedule': True
             , 'tsRequest': nextTime
+            , 'priority': schedule.get('priority', 0)
         }
         self._createTask(now, taskClass, taskArgs, kwargs)
 

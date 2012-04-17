@@ -69,12 +69,17 @@ class ProcessorLock(object):
                             if e.errno != errno.ESRCH:
                                 raise
                         time.sleep(0.01)
+                        # Since it might be dependent on our process and
+                        # will be defunct, we won't be able to tell if it's 
+                        # dead.  We can be reasonably sure that breaking the
+                        # lock is OK.
+                        self.release(force = True)
                 else:
                     # The process is verified as dead
                     self.release(force = True)
 
                 # If we get here, we want to retry
-                return self.acquire()
+                return self.acquire(killExisting=killExisting)
         else:
             with open(self._getPidFile(), 'w') as f:
                 f.write(str(os.getpid()))
@@ -263,7 +268,7 @@ class Processor(object):
                     # We got a token, OK to start a new task
                     try:
                         result = self._consume()
-                    except:
+                    except (Exception, OSError):
                         # _consume has its own error logging; just wait and
                         # retry.
                         time.sleep(self.NO_TASK_CHECK_INTERVAL)
