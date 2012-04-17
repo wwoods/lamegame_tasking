@@ -91,33 +91,47 @@ class Connection(object):
 
         now = datetime.utcnow()
         runAt = self._getRunAtTime(now, runAt)
-        kwargs = self._kwargsEncode(kwargs)
+        originalKwargs = kwargs
+        kwargs = self._kwargsEncode(originalKwargs)
 
         taskName = self._getTaskName(taskClass, kwargs)
         taskColl = self._database[self.TASK_COLLECTION]
 
         existing = taskColl.find_one(
             { '_id': taskName }
-            , { 'batchQueued': 1, 'kwargs': 1, 'state': 1, 'tsRequest': 1 }
+            , { 
+              'batchQueued': 1
+              , 'kwargs': 1
+              , 'state': 1
+              , 'tsRequest': 1 
+              , 'priority': 1
+            }
         )
 
         if existing:
             # Double check kwarg match or we have another problem
             if kwargs != existing.get('kwargs') \
-                or priority != existing.get('priority', 0):
+                or priority < existing.get('priority', 0):
                 raise TaskKwargError("Didn't match existing scheduled "
                     + "batch - {0} -- {1}".format(taskName, existing))
 
         if existing and existing['state'] in self.states.NOT_STARTED_GROUP:
-            # Already an existing task; update the request time if we need to
+            # Already an existing task; update the request time or priority
+            # if we need to.
             oldRunAt = existing['tsRequest']
-            if runAt < oldRunAt:
+            oldPriority = existing.get('priority', 0)
+            if runAt < oldRunAt or priority > oldPriority:
                 # Even if this fails, the task will still run at a point after
                 # when we were requested, so we take don't need to do
                 # safe=True
+                runAtToSet = min(runAt, oldRunAt)
+                priorityToSet = max(priority, oldPriority)
                 taskColl.update(
                     { '_id': taskName, 'tsRequest': oldRunAt }
-                    , { '$set': { 'tsRequest': runAt } }
+                    , { '$set': { 
+                        'tsRequest': runAtToSet
+                        , 'priority': priorityToSet
+                    } }
                 )
         elif existing and existing['state'] in self.states.DONE_GROUP:
             # Already existing, but finished.  This is an error state, since
@@ -129,35 +143,42 @@ class Connection(object):
                 , { '$set': {
                     'state': 'request'
                     , 'tsRequest': runAt
+                    , 'priority': priority
                 }}
                 , { '_id': 1 }
             )
 
             if r is None:
-                # New state?  Try to see if there's an existing request, and 
-                # overwrite if we run before them
-                taskColl.update(
-                    { 
-                        '_id': taskName
-                        , 'state': 'request'
-                        , 'tsRequest': { '$gt': runAt }
-                    }
-                    , { '$set': {
-                        'tsRequest': runAt
-                    }}
+                # New state?  Re-evaluate to see what's up.  Should be 
+                # very infrequent.
+                return self.batchTask(
+                    runAt, taskClass
+                    , priority=priority, **originalKwargs
                 )
-        elif existing and runAt < (existing.get('batchQueued') or datetime.max):
-            # Already an existing task, but it's running; tell it to 
-            # reschedule when finished.
-            r = taskColl.find_and_modify(
-                { '_id': taskName }
-                , { '$set': { 'batchQueued': runAt } }
-            )
 
-            if r is None:
-                # We want to add the task; couldn't set queuing flag
-                print ("SETTING failed, adding new")
-                existing = False
+        elif existing:
+            # Existing task that is running
+            oldRunAt = (existing.get('batchQueued') or datetime.max)
+            oldPriority = existing.get('priority', 0)
+            runAtToSet = min(runAt, oldRunAt)
+            priorityToSet = min(priority, oldPriority)
+            if runAtToSet < oldRunAt or priorityToSet > oldPriority:
+                # Tell it to reschedule when it is finished.
+                r = taskColl.find_and_modify(
+                    { '_id': taskName }
+                    , { '$set': { 
+                        'batchQueued': runAtToSet
+                        , 'priority': priorityToSet
+                    } }
+                )
+
+                if r is None:
+                    # Couldn't set queuing flag, need to retry whole
+                    # procedure
+                    return self.batchTask(
+                        runAt, taskClass
+                        , priority=priority, **originalKwargs
+                    )
 
         if not existing:
             # Not existing or failed to queue; insert
