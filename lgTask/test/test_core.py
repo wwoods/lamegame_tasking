@@ -400,6 +400,19 @@ class TestCore(TestCase):
         finally:
             p.stop()
 
+    def test_processorKillExisting(self):
+        # Fork a test processor, and verify that passing killExisting kills it.
+        pkill = lgTask.Processor.fork(self.newpath)
+        time.sleep(1)
+        p = lgTask.Processor()
+        try:
+            p._stopOnNoTasks = True
+            p.run(killExisting=True)
+        except lgTask.errors.ProcessorAlreadyRunningError:
+            self.fail("Failed to kill fork")
+        finally:
+            pkill()
+
     def test_processorForkNotDefunct(self):
         # Run a forked processor, kill it, and make sure that the processor
         # lock has been released appropriately (a new processor can spawn).

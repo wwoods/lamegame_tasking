@@ -8,6 +8,7 @@ import json
 import multiprocessing
 from Queue import Empty, Queue
 import os
+import signal
 import site
 import socket
 import subprocess
@@ -46,8 +47,10 @@ class ProcessorLock(object):
         self._path = os.path.abspath(path)
 
 
-    def acquire(self):
+    def acquire(self, killExisting=False):
         """Raises a ProcessorAlreadyRunningError if cannot be acquired
+
+        If killExisting is specified, kill any process that has the lock.
         """
         try:
             os.makedirs(self._path)
@@ -57,10 +60,19 @@ class ProcessorLock(object):
             else:
                 pid = open(self._getPidFile(), 'r').read()
                 if os.path.exists('/proc/' + pid):
-                    raise ProcessorAlreadyRunningError()
-                else:
-                    self.release(force = True)
-                    return self.acquire()
+                    if not killExisting:
+                        raise ProcessorAlreadyRunningError()
+                    else:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except OSError, e:
+                            if e.errno != errno.ESRCH:
+                                raise
+                        time.sleep(0.01)
+
+                # If we get here, we want to retry
+                self.release(force = True)
+                return self.acquire()
         else:
             with open(self._getPidFile(), 'w') as f:
                 f.write(str(os.getpid()))
@@ -130,7 +142,7 @@ class Processor(object):
         self.log("{0} - {1}".format(message, error))
 
     @classmethod
-    def fork(cls, home='.'):
+    def fork(cls, home='.', killExisting=True):
         """Forks a new subprocess to run a Processor instance out of the
         given home directory.  Useful for e.g. debug environments, where the
         main script should also spawn a processor but perhaps does something
@@ -144,6 +156,11 @@ class Processor(object):
 
         Returns the function that is already registered with atexit, but may
         be called manually if you need to kill the fork.
+
+        killExisting, if True, will kill any processor holding
+          the lock that this processor will need (thus freeing the lock).  Since
+          fork() is primarily meant for debugging code that expects the fork
+          to always be running with the latest version, this defaults to True.
         """
         hasS = ('-s' in sys.argv)
         runProcess = os.path.abspath(os.path.join(
@@ -155,6 +172,9 @@ class Processor(object):
         if not site.ENABLE_USER_SITE:
             args.append('-s')
         args.extend([ runProcess, home ])
+        if killExisting:
+            args.append('-killExisting')
+
         args = tuple(args)
         proc = subprocess.Popen(args)
         def terminateProc():
@@ -180,14 +200,17 @@ class Processor(object):
             "[{0}] {1}\n".format(now, message)
         )
         
-    def run(self):
+    def run(self, killExisting=False):
         """Run indefinitely or (for debugging) until no tasks are available.
+
+        If killExisting is specified, then forcibly break the lock by killing
+        the process that currently has the lock.
         """
 
         # .lock is automatically appended to FileLock (processor.lock)
         self._lock = ProcessorLock(self._home + '/.processor.lock')
         # raises ProcessorAlreadyRunningError on fail
-        self._lock.acquire()
+        self._lock.acquire(killExisting=killExisting)
         try:
             try:
                 os.makedirs(self._home + '/logs')

@@ -10,14 +10,18 @@ import lgTask
 
 if __name__ == '__main__':
     if sys.argv[1] in ('--help', '-h'):
-        print("Usage: {0} [/path/to/home]".format(sys.argv[0]))
+        print("Usage: {0} [/path/to/home] [-killExisting]".format(sys.argv[0]))
         sys.exit(1)
 
     home = '.'
     if len(sys.argv) > 1:
         home = sys.argv[1]
 
+    killExisting = False
+    if '-killExisting' in sys.argv:
+        killExisting = True
+
     proc = lgTask.Processor(home)
-    proc.run()
+    proc.run(killExisting=killExisting)
 
 
