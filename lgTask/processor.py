@@ -69,9 +69,11 @@ class ProcessorLock(object):
                             if e.errno != errno.ESRCH:
                                 raise
                         time.sleep(0.01)
+                else:
+                    # The process is verified as dead
+                    self.release(force = True)
 
                 # If we get here, we want to retry
-                self.release(force = True)
                 return self.acquire()
         else:
             with open(self._getPidFile(), 'w') as f:
