@@ -322,7 +322,7 @@ class Connection(object):
                 , 'host': socket.gethostname()
             }}
             , new = True
-            , sort = [ ('priority', -1), ('tsRequest', -1) ]
+            , sort = [ ('priority', -1), ('tsRequest', 1) ]
         )
 
         return taskData
@@ -536,8 +536,12 @@ class Connection(object):
             db.drop_index([ ('state', 1), ('taskClass', 1), ('tsRequest', -1) ])
         except pymongo.errors.OperationFailure:
             pass
+        try:
+            db.drop_index([ ('state', 1), ('priority', -1), ('tsRequest', -1) ])
+        except pymongo.errors.OperationFailure:
+            pass
 
-        db.ensure_index([ ('state', 1), ('priority', -1), ('tsRequest', -1) ])
+        db.ensure_index([ ('state', 1), ('priority', -1), ('tsRequest', 1) ])
 
     def _getRunAtTime(self, utcNow, runAt):
         """Changes a runAt variable that might be an interval or datetime,
