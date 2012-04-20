@@ -8,6 +8,17 @@ import socket
 sys.path.insert(0, os.path.abspath(os.path.join(__file__, '../..')))
 import lgTask
 
+try:
+    from setproctitle import setproctitle
+    def setProcessTitle(proc):
+        newTitle = 'lgTaskProcessor ' + proc.getPath('')[:-1]
+        setproctitle(newTitle)
+        proc.log("Set title to " + newTitle)
+except ImportError:
+    def setProcessTitle(proc):
+        proc.log("Could not set process title - easy_install setproctitle")
+        
+
 if __name__ == '__main__':
     if sys.argv[1] in ('--help', '-h'):
         print("Usage: {0} [/path/to/home] [-killExisting]".format(sys.argv[0]))
@@ -22,6 +33,7 @@ if __name__ == '__main__':
         killExisting = True
 
     proc = lgTask.Processor(home)
+    setProcessTitle(proc)
     proc.run(killExisting=killExisting)
 
 
