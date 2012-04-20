@@ -10,6 +10,7 @@ try:
     def setProcessTitle(task, processorHome):
         """Set the process title so that this process is indentifiable."""
         newTitle = 'lgTask ' + task.__class__.__name__ + ' '
+        newTitle += processorHome + ' '
         newTitle += str(task.taskId)
         setproctitle(newTitle)
         task.log("Set process title - " + newTitle)
