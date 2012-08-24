@@ -19,7 +19,13 @@ except ImportError:
         task.log("Could not set process title - easy_install setproctitle")
 
 
-def _runTask(taskClass, taskData, taskConnection, processorHome):
+def _runTask(
+    taskClass
+    , taskData
+    , taskConnection
+    , processorHome
+    , setProcTitle = True
+    ):
     def getLogForId(id):
         return processorHome + '/logs/' + str(id) + '.log'
 
@@ -51,7 +57,8 @@ def _runTask(taskClass, taskData, taskConnection, processorHome):
         success = True
         try:
             task.log = log
-            setProcessTitle(task, processorHome)
+            if setProcTitle:
+                setProcessTitle(task, processorHome)
             if task.DEBUG_TIMING:
                 log("Starting task at {0}".format(
                     datetime.datetime.utcnow().isoformat()

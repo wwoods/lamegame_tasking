@@ -241,7 +241,22 @@ class Processor(object):
                 or sys.version_info[1] >= 7
                 or threading.current_thread().name == 'MainThread'
             )
-            if self._useMultiprocessing:
+            # Threaded tasks execute in a slave process to the processor itself.
+            # There are a few reasons for this:
+            # 1. If code changes, and we need to reboot the processor, the
+            #    slave process can finish running its tasks before exiting
+            #    but the processor can restart and keep going with new tasks.
+            # 2. If a task misbehaves and wreaks havoc, the processor itself
+            #    will not be affected.
+            self._useThreading = (
+                self._useMultiprocessing 
+                and self.config.get('threaded', False)
+            )
+            if self._useThreading:
+                self._useMultiprocessing = False
+                self.log("Using threading")
+                self._slave = None
+            elif self._useMultiprocessing:
                 self.log("Using multiprocessing")
             else:
                 self.log("Not using multiprocessing - detected non-main thread")
@@ -274,9 +289,11 @@ class Processor(object):
                         time.sleep(self.NO_TASK_CHECK_INTERVAL)
                         result = False
                     if not result:
-                        if self._stopOnNoTasks:
-                            break
-                        elif len(self._monitors) == 0:
+                        if len(self._monitors) == 0:
+                            if self._stopOnNoTasks:
+                                # This is a test, we're not running anything,
+                                # so done
+                                break
                             time.sleep(self.NO_TASK_CHECK_INTERVAL)
                             self._startTaskQueue.put('any')
         finally:
@@ -325,15 +342,22 @@ class Processor(object):
                 # available as part of the log.
                 with open(self._getLogFile(taskId), 'w') as f:
                     f.write(json.dumps(taskData, cls=_JsonEncoder) + '\n')
-
-                if Task.DEBUG_TIMING:
-                    open(self._getLogFile(taskId), 'a').write(
-                        "Starting process at {0}\n".format(
-                            datetime.datetime.utcnow().isoformat()
+                    if Task.DEBUG_TIMING:
+                        f.write(
+                            "Starting process at {0}\n".format(
+                                datetime.datetime.utcnow().isoformat()
+                            )
                         )
-                    )
 
-                if self._useMultiprocessing:
+                if self._useThreading:
+                    # Run tasks as threads in the Processor's forked processing
+                    # task.
+                    slave = self._getSlave()
+                    slave.execute(taskData)
+                    # We use the process variable to get our pid for tracking
+                    # the new task; the slave process suffices
+                    process = slave
+                elif self._useMultiprocessing:
                     args = ( 
                         self._tasksAvailable[taskData['taskClass']]
                         , taskData
@@ -373,6 +397,19 @@ class Processor(object):
 
     def _getPidFile(self, tid):
         return self.getPath('pids/' + str(tid) + '.pid')
+
+    def _getSlave(self):
+        """Returns a fork'd slave process."""
+        if (
+                self._slave is not None 
+                and self._slave.is_alive()
+                and self._slave.isAccepting()
+            ):
+            return self._slave
+
+        self._slave = _ProcessorSlave(self)
+        self._slave.start()
+        return self._slave
         
     @classmethod
     def _getTasksAvailable(cls, home):
@@ -410,7 +447,7 @@ class Processor(object):
                 tid = file[:-4]
                 try:
                     with open(path, 'r') as f:
-                        pid = int(f.read())
+                        pid = int(f.read().split(',')[0])
                     oldMonitor = self._monitors.get(tid)
                     if oldMonitor is None or not oldMonitor.isAlive():
                         latestStart = datetime.datetime.utcfromtimestamp(
@@ -452,7 +489,12 @@ class Processor(object):
                 try:
                     # For efficiency, we want to use event-driven wait for
                     # a process if possible.
-                    os.waitpid(pid, 0)
+                    if not self._useThreading:
+                        os.waitpid(pid, 0)
+                    else:
+                        # The pid being alive can still mean the task is dead.
+                        # We also have to periodically check the pid file
+                        raise OSError
                 except OSError:
                     # If we're waiting on a non-child process, we have to do 
                     # our own polling loop
@@ -460,6 +502,13 @@ class Processor(object):
                         try:
                             os.kill(pid, 0)
                             time.sleep(0.1)
+                            if self._useThreading:
+                                with open(self._getPidFile(tid), 'r') as f:
+                                    data = f.read()
+                                if ',done' in data:
+                                    # Task marked as done, don't need to wait
+                                    # on pid to exit
+                                    raise OSError
                         except OSError:
                             break
             except Exception, e:
@@ -496,4 +545,131 @@ class Processor(object):
             self.taskConnection.batchTask('30 minutes', 'ScheduleAuditTask')
             lastTime = now
         return lastTime
+
+
+class _ProcessorSlave(multiprocessing.Process):
+
+    MAX_TIME = 3600
+    MAX_TIME_doc = """Max time, in seconds, to accept tasks."""
+
+    def __init__(self, processor):
+        multiprocessing.Process.__init__(self)
+
+        self._processor = processor
+        self._connection = self._processor.taskConnection
+        self._processorHome = self._processor._home
+        self._taskClasses = self._processor._tasksAvailable
+        self._processorPid = os.getpid()
+
+        self._queue = multiprocessing.Queue()
+        self._running = []
+        self._running_doc = """List of running task threads"""
+        self._isAccepting = multiprocessing.Value('b', True)
+        self._startTime = time.time()
+
+
+    def execute(self, taskData):
+        """Queue the task to be ran."""
+        self._queue.put(taskData)
+
+
+    def isAccepting(self):
+        """Called by Processor to see if we're still accepting"""
+        return self._isAccepting.value
+
+
+    def run(self):
+        try:
+            while True:
+                try:
+                    # See if we should still be running...
+                    if self._isAccepting.value:
+                        self._checkAccepting()
+                    if not self._shouldContinue():
+                        break
+
+                    self._checkRunning()
+
+                    taskData = self._queue.get(timeout = 4)
+                    taskThread = threading.Thread(
+                        target = self._runTaskThreadMain
+                        , args = (taskData,)
+                    )
+                    taskThread.start()
+                    self._running.append(taskThread)
+
+                except Empty:
+                    pass
+                except Exception:
+                    self._processor.log("Slave error {0}: {1}".format(
+                        self.pid, traceback.format_exc()
+                    ))
+        finally:
+            pass
+
+
+    def start(self):
+        """We override multiprocessing.Process.start() so that the Processor
+        can gracefully exit without waiting for its child process to exit.
+        The default python multiprocessing behavior is to wait until all
+        child processes have exited before exiting the main process; we don't
+        want this.
+        """
+        result = multiprocessing.Process.start(self)
+        multiprocessing.current_process()._children.remove(self)
+        return result
+
+
+    def _checkAccepting(self):
+        """Stop accepting new tasks to execute if:
+
+        1. We've run for too long
+        2. Our parent process is no longer our processor (this means that
+            the processor has executed, so we won't get more)
+        """
+        if (
+                time.time() - self._startTime >= self.MAX_TIME
+                or os.getppid() != self._processorPid
+            ):
+            self._isAccepting.value = False
+
+
+    def _checkRunning(self):
+        """Check on running threads"""
+        for i in reversed(range(len(self._running))):
+            t = self._running[i]
+            if not t.is_alive():
+                self._running.pop(i)
+
+
+    def _runTaskThreadMain(self, taskData):
+        """Ran as the main method of a spawned thread; responsible for
+        running the task passed.
+        """
+        taskCls = self._taskClasses[taskData['taskClass']]
+        try:
+            _runTask(
+                taskCls
+                , taskData
+                , self._connection
+                , self._processorHome
+                , setProcTitle = False
+            )
+        finally:
+            # This task's "pid" is no longer running, so mark the pid file as
+            # done so that the executor might exit
+            with open(self._processor._getPidFile(taskData['_id']), 'a') \
+                as f:
+                f.write(",done")
+
+
+    def _shouldContinue(self):
+        """A slave should stop running if it is not currently running any
+        tasks and:
+
+        It is no longer accepting new tasks.
+        """
+        if len(self._running) == 0 and not self._isAccepting.value:
+            return False
+        return True
 

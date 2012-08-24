@@ -11,10 +11,14 @@ class InterruptableThread(threading.Thread):
     """
 
 
-    def raiseException(self, exceptionClass):
+    def raiseException(self, exceptionClass, ensureDeath=True):
         """Thanks to http://stackoverflow.com/questions/323972/is-there-any-way-to-kill-a-thread-in-python
         for providing a method of raising an exception in a thread to neatly
         kill it while respecting python cleanup.
+
+        ensureDeath -- If specified as False, don't wait to join() the thread.
+            Just assume that the specified exceptionClass did, or will 
+            eventually, terminate the thread.
         
         Call this from the main thread to raise an exception of type 
         exceptionClass in the running thread's code.
@@ -22,9 +26,12 @@ class InterruptableThread(threading.Thread):
         if not inspect.isclass(exceptionClass):
             raise ValueError("Requires exception class, not instance")
         
-        while self.is_alive():
+        if ensureDeath:
+            while self.is_alive():
+                self._raiseException(exceptionClass)
+                self.join(1)
+        else:
             self._raiseException(exceptionClass)
-            self.join(5)
 
 
     def _raiseException(self, exceptionClass):
