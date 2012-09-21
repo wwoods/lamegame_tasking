@@ -1,5 +1,6 @@
 
 import datetime
+import time
 import traceback
 import os
 from lgTask.errors import RetryTaskError
@@ -28,9 +29,12 @@ def _runTask(
     ):
     def getLogForId(id):
         return processorHome + '/logs/' + str(id) + '.log'
+    def getPidForId(id):
+        return processorHome + '/pids/' + str(id) + '.pid'
 
     taskId = taskData['_id']
     logFile = getLogForId(taskId)
+    pidFileName = getPidForId(taskId)
 
     lastLogMessage = [ "(No log)" ]
     def log(message):
@@ -59,6 +63,22 @@ def _runTask(
             task.log = log
             if setProcTitle:
                 setProcessTitle(task, processorHome)
+
+            # Wait for the Processor to fill out our pid file; this ensures 
+            # that if the processor crashes after setting our state to working
+            # and after launching us, then it can justifiably claim that we
+            # have died when it does not find the pid file.
+            waitFor = 5 #seconds
+            sleepTime = 0.5
+            while True:
+                with open(pidFileName, 'r') as f:
+                    if f.read() == str(os.getpid()):
+                        break
+                waitFor -= sleepTime
+                if waitFor <= 0:
+                    raise Exception("Pid file never initialized")
+                time.sleep(sleepTime)
+
             if task.DEBUG_TIMING:
                 log("Starting task at {0}".format(
                     datetime.datetime.utcnow().isoformat()

@@ -13,4 +13,4 @@ class IncValueTask(lgTask.Task):
         new = db.find_one({ 'id': id })['value']
         self.log("New: {0}".format(new))
         
-        self.log("Changed from {0} to {1}".format(old, new))
+        self.log("Changed {id} from {0} to {1}".format(old, new, id = id))

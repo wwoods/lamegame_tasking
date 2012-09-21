@@ -10,6 +10,7 @@ import uuid
 
 from lgTask.errors import *
 from lgTask.lib.timeInterval import TimeInterval
+from lgTask import talk
 
 def _decodePyMongo(value):
     try:
@@ -66,6 +67,17 @@ class Connection(object):
     database = property(_getDatabase)
     
     def __init__(self, connString, **kwargs):
+        """Create a new lgTask.Connection based off of a given connString or
+        already initialized Connection.  
+        
+        NOTE: If connString is an object, then a _BRAND NEW_ connection to
+        that object will be created.  This is to prevent pymongo.Connection,
+        which is thread-safe but not for using the same socket on multiple
+        threads, from re-using the same socket in different procs.
+        """
+        if isinstance(connString, Connection):
+            connString = connString._database
+
         if isinstance(connString, pymongo.database.Database):
             self._initPyMongoDb(connString)
         elif connString.startswith("pymongo://"):
@@ -190,7 +202,16 @@ class Connection(object):
             }
             self._createTask(now, taskClass, taskArgs, kwargs)
 
-        
+
+    def close(self):
+        """Close the lgTask connection... mainly for forked processes.
+        """
+        if isinstance(self._connection, pymongo.Connection):
+            self._connection.disconnect()
+        else:
+            raise NotImplementedError()
+
+
     def createTask(self, taskClass, priority=0, **kwargs):
         """Creates a task to be executed immediately.
         """
@@ -215,6 +236,27 @@ class Connection(object):
 
     def getNewId(self):
         return uuid.uuid4().hex
+
+    def getTalk(self, **kwargs):
+        """Returns an lgTask.talk.TalkConnection object with the same 
+        database and encoding / decoding as this TaskConnection.
+        """
+        tc = talk.TalkConnection(self, **kwargs)
+        return tc
+
+    def getWorking(self, host = False, taskClass = None):
+        """Get working task _id and tsStarted
+
+        host -- If True, only on this host.
+        """
+        query = { 'state': 'working' }
+        if host:
+            query['host'] = socket.gethostname()
+        if taskClass:
+            query['taskClass'] = taskClass
+        return self._database[self.TASK_COLLECTION].find(
+                query, { '_id': 1, 'tsStarted': 1 }
+        )
         
     def intervalTask(self, interval, taskClass, fromStart=False
         , priority=0, **kwargs):
@@ -310,22 +352,52 @@ class Connection(object):
         """
         c = self._database[self.TASK_COLLECTION]
         now = datetime.utcnow()
-        taskData = c.find_and_modify(
-            {
-                'taskClass': { '$in': availableTasks.keys() }
-                , 'state': 'request'
-                , 'tsRequest': { '$lte': now }
-            }
-            , { '$set': {
-                'state': 'working'
-                , 'tsStart': now
-                , 'host': socket.gethostname()
-            }}
-            , new = True
-            , sort = [ ('priority', -1), ('tsRequest', 1) ]
+        
+        # Ok... since we can't use the full index with find_and_modify, we'll
+        # just use the find / update operations over and over
+        task = None
+        updates = dict(
+            state = 'working'
+            , tsStart = now
+            , host = socket.gethostname()
         )
+        while True:
+            # SLOW
+            #task = c.find_and_modify(
+            #    {
+            #        'taskClass': { '$in': availableTasks.keys() }
+            #        , 'state': 'request'
+            #        , 'tsRequest': { '$lte': now }
+            #    }
+            #    , {
+            #        '$set': updates
+            #    }
+            #    , new = True
+            #    , sort = [ ('priority', -1), ('tsRequest', 1) ]
+            #)
+            #return task
+            task = c.find_one(
+                {
+                    'taskClass': { '$in': availableTasks.keys() }
+                    , 'state': 'request'
+                    , 'tsRequest': { '$lte': now }
+                }
+                , sort = [ ('priority', -1), ('tsRequest', 1) ]
+            )
+            if task is None:
+                # No tasks are waiting to run
+                break
+            r = c.update(
+                { '_id': task['_id'], 'state': 'request' }
+                , { '$set': updates }
+                , safe = True
+            )
+            if r.get('updatedExisting') == True:
+                # Successfully acquired the task
+                task.update(updates)
+                break
 
-        return taskData
+        return task
 
     def taskDied(self, taskId, startedBefore):
         """Called when a task's process is detected as dead.  Updates the 
@@ -513,7 +585,7 @@ class Connection(object):
                     "pymongo://[user:password@]host[:port]/db"))
         user, password, host, port, db, coll = m.groups()
         
-        c = pymongo.Connection(host=host, port=port)
+        c = pymongo.Connection(host=host, port=port, max_pool_size = 100)
         if db is not None:
             db = db[1:] # Trim off leading slash
             c = c[db]
@@ -530,18 +602,34 @@ class Connection(object):
         """Assert that all necessary indexes exist in the tasks collections 
         to maintain performance.  Typically called by a Processor.
         """
-        db = self._database[self.TASK_COLLECTION]
-        try:
-            # Get rid of old index
-            db.drop_index([ ('state', 1), ('taskClass', 1), ('tsRequest', -1) ])
-        except pymongo.errors.OperationFailure:
-            pass
-        try:
-            db.drop_index([ ('state', 1), ('priority', -1), ('tsRequest', -1) ])
-        except pymongo.errors.OperationFailure:
-            pass
+        col = self._database[self.TASK_COLLECTION]
 
-        db.ensure_index([ ('state', 1), ('priority', -1), ('tsRequest', 1) ])
+        desired = set()
+        desired.add(( 
+                ('state', 1)
+                , ('priority', -1)
+                , ('tsRequest', 1)
+        ))
+        desired.add((
+                ('state', 1)
+                , ('host', 1)
+        ))
+        desired.add((
+                ('state', 1)
+                , ('taskClass', 1)
+        ))
+
+        indexes = col.index_information()
+        # Clean up indexes
+        for name, index in indexes.items():
+            if name.startswith('_'):
+                # System index
+                continue
+            if tuple(index['key']) not in desired:
+                col.drop_index(name)
+
+        for index in desired:
+            col.ensure_index(list(index))
 
     def _getRunAtTime(self, utcNow, runAt):
         """Changes a runAt variable that might be an interval or datetime,
@@ -594,8 +682,13 @@ class Connection(object):
             raise ValueError("Failed to parse: {0}".format(connString))
         
     def _initPyMongoDb(self, db):
-        self._connection = db.connection
-        self._database = db
+        # COPY the database, don't use the same one, in case we're a forked
+        # process.
+        self._connection = pymongo.Connection(
+                db.connection.host
+                , db.connection.port
+        )
+        self._database = self._connection[db.name]
 
     @classmethod
     def _kwargsDecode(cls, kwargs):

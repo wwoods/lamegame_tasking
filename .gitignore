@@ -2,4 +2,6 @@
 build
 dist
 *.egg-info
+benchmarks/tmp
+lgTask/talk/test/testProcessor
 

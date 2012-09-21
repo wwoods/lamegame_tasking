@@ -206,7 +206,7 @@ class TestCore(TestCase):
         doc = self.conn._database[self.conn.TASK_COLLECTION].find_one(
             { 'state': 'success' }        
         )
-        self.assertEqual("Changed from 6 to 7", doc['lastLog'])
+        self.assertEqual("Changed a from 6 to 7", doc['lastLog'])
 
     def test_consumeOtherPath(self):
         db = self.conn._database['test']

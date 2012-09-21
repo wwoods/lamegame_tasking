@@ -13,6 +13,7 @@ import site
 import socket
 import subprocess
 import sys
+import thread
 import threading
 import time
 import traceback
@@ -108,6 +109,10 @@ class ProcessorLock(object):
         return os.path.join(self._path, 'lock.pid')
 
 
+class _ProcessorStop(Exception):
+    pass
+
+
 class Processor(object):
     """Processes tasks for the given db.  Also performs certain administrative
     actions (or ensures that they are performed) on the tasks database.
@@ -183,7 +188,7 @@ class Processor(object):
             args.append('-killExisting')
 
         args = tuple(args)
-        proc = subprocess.Popen(args)
+        proc = subprocess.Popen(args, close_fds = True)
         def terminateProc():
             # We have to both terminate AND wait, or we'll get defunct
             # processes lying around
@@ -255,7 +260,7 @@ class Processor(object):
             if self._useThreading:
                 self._useMultiprocessing = False
                 self.log("Using threading")
-                self._slave = None
+                self._slaves = [ None ] * multiprocessing.cpu_count()
             elif self._useMultiprocessing:
                 self.log("Using multiprocessing")
             else:
@@ -263,14 +268,18 @@ class Processor(object):
 
             self.log("Processor started - pid " + str(os.getpid()))
 
+            # Start monitoring our starting pids
+            self._monitorCurrentPids()
 
-            # Run the scheduler loop; start with 1 task
+            # Run the scheduler loop; start with 1 task running at a time
             self._startTaskQueue.put('any')
-            lastTime = datetime.datetime.utcnow()
+            lastScheduler = time.time()
+            lastMonitor = 0.0
             while True:
-                self._monitorCurrentPids()
-                lastTime = self._schedulerAudit(lastTime)
+                lastScheduler = self._schedulerAudit(lastScheduler)
+                lastMonitor = self._monitorAudit(lastMonitor)
                 try:
+                    self._startTaskQueue.put('any')
                     next = self._startTaskQueue.get(timeout=5)
                 except Empty:
                     # Timeout, no task start tokens are available.
@@ -283,6 +292,8 @@ class Processor(object):
                     # We got a token, OK to start a new task
                     try:
                         result = self._consume()
+                    except _ProcessorStop:
+                        raise
                     except (Exception, OSError):
                         # _consume has its own error logging; just wait and
                         # retry.
@@ -294,8 +305,11 @@ class Processor(object):
                                 # This is a test, we're not running anything,
                                 # so done
                                 break
-                            time.sleep(self.NO_TASK_CHECK_INTERVAL)
+                            # Glitch condition, might as well start running
+                            # stuff again.
                             self._startTaskQueue.put('any')
+        except _ProcessorStop:
+            self.error("Received _ProcessorStop")
         finally:
             self._lock.release()
 
@@ -303,18 +317,27 @@ class Processor(object):
         """Run the Processor asynchronously for test cases.
         """
         self.NO_TASK_CHECK_INTERVAL = 0.01
-        self._thread = InterruptableThread(target=self.run)
+        def withProfile(self):
+            import cProfile
+            p = cProfile.Profile(builtins = False, subcalls = False)
+            p.runctx('self.run()', globals(), locals())
+            from io import BytesIO
+            buffer = BytesIO()
+            import pstats
+            pr = pstats.Stats(p, stream = buffer)
+            pr.sort_stats("cumulative")
+            pr.print_stats()
+            open('tmp', 'w').write(buffer.getvalue())
+        self._thread = InterruptableThread(target=withProfile, args=(self,))
         self._thread.start()
 
     def stop(self):
-        """Halt an asynchronously started processor.
+        """Halt an asynchronously started processor (again, test only)
         """
         self._stopOnNoTasks = True
-        self._thread.join(10)
+        self._thread.join(5)
         if self._thread.is_alive():
-            class ProcessorStop(Exception):
-                pass
-            self._thread.raiseException(ProcessorStop)
+            self._thread.raiseException(_ProcessorStop)
 
     def _consume(self):
         """Grab and consume a task if one is available.  All exceptions should
@@ -328,6 +351,9 @@ class Processor(object):
             taskData = c._startTask(self._tasksAvailable)
             if taskData is None:
                 return False
+        except _ProcessorStop:
+            # Stopped!
+            raise
         except Exception as e:
             self.error("While starting task")
         else:
@@ -349,43 +375,52 @@ class Processor(object):
                             )
                         )
 
-                if self._useThreading:
-                    # Run tasks as threads in the Processor's forked processing
-                    # task.
-                    slave = self._getSlave()
-                    slave.execute(taskData)
-                    # We use the process variable to get our pid for tracking
-                    # the new task; the slave process suffices
-                    process = slave
-                elif self._useMultiprocessing:
-                    args = ( 
-                        self._tasksAvailable[taskData['taskClass']]
-                        , taskData
-                        , self.taskConnection
-                        , self._home
-                    )
-                    process = multiprocessing.Process(
-                        target=_runTask
-                        , args=args
-                    )
-                    process.start()
-                else:
-                    # Get our task runner script
-                    taskRunner = os.path.abspath(os.path.join(
-                        __file__
-                        , '../../bin/lgTaskRun'
-                    ))
-                    
-                    args = (taskRunner,taskId,self._home)
-                    process = subprocess.Popen(args)
-
-                # Start was successful, start a PID file and monitor it
-                pid = process.pid
                 with open(self._getPidFile(taskId), 'w') as pidFile:
+                    pid = None
+                    if self._useThreading:
+                        # Run tasks as threads in the Processor's forked 
+                        # processing task.
+                        slave = self._getSlave()
+                        slave.execute(taskData)
+                        # We use the process variable to get our pid for 
+                        # tracking the new task; the slave process suffices
+                        pid = slave.pid
+                    elif self._useMultiprocessing:
+                        args = ( 
+                            self._tasksAvailable[taskData['taskClass']]
+                            , taskData
+                            , self.taskConnection
+                            , self._home
+                        )
+                        process = multiprocessing.Process(
+                            target=_runTask
+                            , args=args
+                        )
+                        process.start()
+                        pid = process.pid
+                    else:
+                        # Get our task runner script
+                        taskRunner = os.path.abspath(os.path.join(
+                            __file__
+                            , '../../bin/lgTaskRun'
+                        ))
+                        
+                        args = (taskRunner,taskId,self._home)
+                        process = subprocess.Popen(args)
+                        pid = process.pid
+
+                    # Start was successful, start a PID file and monitor it
                     pidFile.write(str(pid))
+
                 self._monitorPid(taskId, pid, latestStartTime)
                 return True
             except Exception as e:
+                try:
+                    os.remove(self._getPidFile(taskId))
+                except OSError:
+                    # No biggie if we can't clean up, a monitor will clean
+                    # it up eventually.
+                    pass
                 open(self._getLogFile(taskId), 'a').write(
                     'Error on launch: ' + traceback.format_exc()
                 )
@@ -399,17 +434,24 @@ class Processor(object):
         return self.getPath('pids/' + str(tid) + '.pid')
 
     def _getSlave(self):
-        """Returns a fork'd slave process."""
-        if (
-                self._slave is not None 
-                and self._slave.is_alive()
-                and self._slave.isAccepting()
-            ):
-            return self._slave
+        """Returns a fork'd slave process.  Checks on the running condition
+        of the slave before delegating."""
+        lowest = None
+        for i in range(len(self._slaves)):
+            s = self._slaves[i]
+            if (
+                    s is None 
+                    or not s.is_alive()
+                    or not s.isAccepting()
+                ):
+                # Allocate new slave
+                self._slaves[i] = s = _ProcessorSlave(self)
+                s.start()
+            tc = s.getTaskCount()
+            if lowest is None or tc < lowest[0]:
+                lowest = (tc, s)
 
-        self._slave = _ProcessorSlave(self)
-        self._slave.start()
-        return self._slave
+        return lowest[1]
         
     @classmethod
     def _getTasksAvailable(cls, home):
@@ -437,6 +479,26 @@ class Processor(object):
                 tasksAvailable[name] = obj
         return tasksAvailable
 
+    def _monitorAudit(self, lastTime):
+        """See if the database thinks we have any running tasks that don't
+        have matching pid files (meaning they've died).
+        """
+        now = time.time()
+        if now - lastTime < 60.0:
+            return lastTime
+
+        tasks = self.taskConnection.getWorking(host = True)
+        for td in tasks:
+            tid = td['_id']
+            if tid in self._monitors:
+                # Already monitoring
+                continue
+            if not os.path.exists(self._getPidFile(tid)):
+                # No pid file, mark failed
+                self.taskConnection.taskDied(tid, td['tsStarted'])
+
+        return now
+
     def _monitorCurrentPids(self):
         """Spawn a monitor for each task in the pids folder; used on init and
         could be used by sanity checks.  Will not double monitor any tasks.
@@ -447,7 +509,7 @@ class Processor(object):
                 tid = file[:-4]
                 try:
                     with open(path, 'r') as f:
-                        pid = int(f.read().split(',')[0])
+                        pid = int(f.read())
                     oldMonitor = self._monitors.get(tid)
                     if oldMonitor is None or not oldMonitor.isAlive():
                         latestStart = datetime.datetime.utcfromtimestamp(
@@ -501,14 +563,12 @@ class Processor(object):
                     while True:
                         try:
                             os.kill(pid, 0)
-                            time.sleep(0.1)
                             if self._useThreading:
-                                with open(self._getPidFile(tid), 'r') as f:
-                                    data = f.read()
-                                if ',done' in data:
+                                if not os.path.exists(self._getPidFile(tid)):
                                     # Task marked as done, don't need to wait
                                     # on pid to exit
                                     raise OSError
+                            time.sleep(1.0)
                         except OSError:
                             break
             except Exception, e:
@@ -520,8 +580,11 @@ class Processor(object):
                 # We want to clean up the pid file and ensure that the database
                 # entry is OK.
                 try:
-                    self.taskConnection.taskDied(tid, latestStart)
-                    os.remove(self._getPidFile(tid))
+                    pidFile = self._getPidFile(tid)
+                    if os.path.exists(pidFile):
+                        # Illegal task exit, mark dead
+                        self.taskConnection.taskDied(tid, latestStart)
+                        os.remove(pidFile)
                 except Exception, e:
                     self.log(
                         "Monitor exception in end for {0}:{1} - {2}".format(
@@ -540,8 +603,8 @@ class Processor(object):
         the new scheduled time
         """
 
-        now = datetime.datetime.utcnow()
-        if lastTime is None or now.minute != lastTime.minute:
+        now = time.time()
+        if lastTime is None or now - lastTime > 120.0:
             self.taskConnection.batchTask('30 minutes', 'ScheduleAuditTask')
             lastTime = now
         return lastTime
@@ -556,7 +619,7 @@ class _ProcessorSlave(multiprocessing.Process):
         multiprocessing.Process.__init__(self)
 
         self._processor = processor
-        self._connection = self._processor.taskConnection
+        self._connection = Connection(processor.taskConnection)
         self._processorHome = self._processor._home
         self._taskClasses = self._processor._tasksAvailable
         self._processorPid = os.getpid()
@@ -565,6 +628,7 @@ class _ProcessorSlave(multiprocessing.Process):
         self._running = []
         self._running_doc = """List of running task threads"""
         self._isAccepting = multiprocessing.Value('b', True)
+        self._runningCount = multiprocessing.Value('i', 0)
         self._startTime = time.time()
 
 
@@ -573,12 +637,24 @@ class _ProcessorSlave(multiprocessing.Process):
         self._queue.put(taskData)
 
 
+    def getTaskCount(self):
+        """Returns the number of running tasks from either the Processor or
+        the _ProcessorSlave."""
+        return self._runningCount.value
+
+
     def isAccepting(self):
         """Called by Processor to see if we're still accepting"""
         return self._isAccepting.value
 
 
     def run(self):
+        # We're in our own process now, so disconnect the processor's 
+        # pymongo connection to make sure we don't hold those sockets open
+        self._processor.taskConnection.close()
+
+        # Any tasks that we start only really need a teeny bit of stack
+        thread.stack_size(1024 * 1024)
         try:
             while True:
                 try:
@@ -588,8 +664,13 @@ class _ProcessorSlave(multiprocessing.Process):
                     if not self._shouldContinue():
                         break
 
+                    # Update running count
+                    self._runningCount.value = len(self._running)
+
+                    # Check tasks are running
                     self._checkRunning()
 
+                    # Get new task
                     taskData = self._queue.get(timeout = 4)
                     taskThread = threading.Thread(
                         target = self._runTaskThreadMain
@@ -658,16 +739,19 @@ class _ProcessorSlave(multiprocessing.Process):
         finally:
             # This task's "pid" is no longer running, so mark the pid file as
             # done so that the executor might exit
-            with open(self._processor._getPidFile(taskData['_id']), 'a') \
-                as f:
-                f.write(",done")
+            pidFile = self._processor._getPidFile(taskData['_id'])
+            try:
+                os.remove(pidFile)
+            except OSError:
+                # File didn't exist, oh well, we were just going to remove it.
+                # Even if it's another error (exists but not deleted), this
+                # isn't fatal, as when the pid dies the monitor will stop.
+                pass
 
 
     def _shouldContinue(self):
         """A slave should stop running if it is not currently running any
-        tasks and:
-
-        It is no longer accepting new tasks.
+        tasks and it is no longer accepting new tasks.
         """
         if len(self._running) == 0 and not self._isAccepting.value:
             return False
