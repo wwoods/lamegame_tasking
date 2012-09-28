@@ -20,7 +20,7 @@ class TestInterruptableThread(unittest.TestCase):
 
             def stop(self):
                 self.raiseException(ItError)
-                self.join(0.1)
+                self.join(0.2)
                 self._stop = True
 
         t = It()

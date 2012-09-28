@@ -4,85 +4,187 @@ import socket
 import threading
 import time
 import uuid
-import Pyro4
+
+# We use rfoo to communicate between nodes; I also tried Pyro4, but rfoo is
+# much faster and more robust.
+try:
+    import rfoo
+    def _rpcSpawnServer(talkServer):
+        """Runs an rpc server in a new thread and returns a unique identifier
+        that the rpcGetProxy() method can take as an argument to connect to
+        that server.
+        
+        talkServer -- _Server
+        
+        Returns tuple: ( uri for connection, server object )
+        """
+        class _RfooRpcClient(rfoo.BasicClient):
+            def getObjects(self, *args, **kwargs):
+                return talkServer.getObjects(*args, **kwargs)
+        server = rfoo.InetServer(_RfooRpcClient)
+        thread = threading.Thread(
+            target = server.start
+            , kwargs = dict(port = 0)
+        )
+        thread.daemon = True
+        thread.start()
+        while True:
+            # Wait until we know our port
+            port = server._conn.getsockname()[1]
+            if port != 0:
+                break
+            time.sleep(0.01)
+        uri = socket.gethostname() + ':' + str(port)
+        return ( uri, server )
+    
+    def _rpcGetProxy(uri):
+        """Gets a proxy for the given uri.
+        
+        Returns: proxy obj
+        """
+        host, port = uri.split(':')
+        conn = rfoo.InetConnection().connect(
+                host = host
+                , port = int(port)
+        )
+        proxy = rfoo.Proxy(conn)
+        return proxy
+    
+    def _rpcCloseProxy(proxy):
+        """Closes a proxy object previously returned by _rpcGetProxy.
+        """
+        proxy._conn.close()
+    
+    
+except ImportError:
+    # rfoo is definitely preferred (faster), but since Pyro4 is pure python
+    # and easier to install (e.g. on Mac OS X), we'll support that too.
+    try:
+        import Pyro4
+        
+        Pyro4.config.HMAC_KEY = '897FHEHEfuheulhunvzus&#*uuh*^(#^@#%' * 88 + 'a'
+        Pyro4.config.COMPRESSION = False #Faster without...
+        
+        def _rpcSpawnServer(talkServer):
+            server = Pyro4.Daemon(host = socket.gethostname())
+            uri = server.register(talkServer)
+            thread = threading.Thread(target = server.requestLoop)
+            thread.daemon = True
+            thread.start()
+            return (uri.asString(), server)
+        
+        def _rpcGetProxy(uri):
+            proxy = Pyro4.Proxy(uri)
+            return proxy
+        
+        def _rpcCloseProxy(proxy):
+            proxy._pyroRelease()
+            
+            
+    except ImportError:
+        raise ImportError("Requires either rfoo (preferred) or Pyro4")
 
 from lgTask.talk.error import TalkError, TalkTimeoutError
+
+def resetFork():
+    """Since we use some class-level global state variables, forks can 
+    become corrupt if we don't clean them up.
+    """
+    # Seems infeasible, but guess what?  A lot of times the fork() happens
+    # within this lock, meaning that forked processes have a permalock on 
+    # _Server._cls_lock.  So re-allocate it here to get around that.
+    _Server._cls_lock = threading.Lock()
+    _Server._servers = {}
+    TalkConnection._proxies = {}
+
 
 class _ServerKey(object):
     """Responsible to the _Server for handling dispatching to and from a
     key.
     """
 
-    RECV_POLL = 1.0
-
     def __init__(self, server, key):
         self.server = server
         self.key = key
         self._lock = threading.Lock()
         self._requests = []
-        self._requests_doc = """List of _ServerRequest objects waiting for
-                more objects."""
-        self._recvTimeout = self.server._RECV_TIMEOUT
-        self._recvTimeout_doc = """Time in seconds after which a recvObjects()
-                call will time out, leaving the sender to figure out what to
-                do with the remaining items.
-                """
+        self._requests_doc = """List of _SendRequest objects waiting to be 
+                sent; kept in priority order, FIFO order."""
 
     
     def addRequest(self, request):
-        """Adds an _ServerRequest that needs to be filled."""
+        """Adds an _SendRequest that needs to be filled."""
         with self._lock:
-            self._requests.append(request)
+            added = False
+            reqs = self._requests[:]
+            for i in reversed(xrange(len(reqs))):
+                r = reqs[i]
+                if r.isClosed:
+                    reqs.pop(i)
+            ll = len(self._requests) - 1
+            for i, r in enumerate(reversed(reqs)):
+                # Convert to reversed order
+                i = ll - i
+                if request.priority <= r.priority:
+                    reqs.insert(i + 1, request)
+                    added = True
+                    break
+            if not added:
+                reqs.insert(0, request)
+            self._requests = reqs
+        self._updateCount()
 
 
-    def recvObjects(self, objects):
-        """Receive objects into our available requests, as we can.  Timeout
-        with self._recvTimeout.
-        """
-        e = time.time() + self._recvTimeout
-        received = 0
-        while True:
-            # Poll!
-            with self._lock:
-                for r in self._requests[:]:
-                    received += r.addResults(objects[received:])
-                    if received == len(objects):
-                        # We're done!  Everything was accepted
-                        self._updateQueued()
-                        return received
-                    elif r.isClosed:
-                        # Remove from requests list
-                        self._requests.remove(r)
-
-            # See if we should stop, and sleep for next poll
-            left = e - time.time()
-            if left <= 0:
+    def getObjects(self, desired, batchSize):
+        """Receive as many objects that we're trying to send as we can."""
+        objs = []
+        # self._requests is immutable in-place, so..
+        reqs = self._requests
+        for r in reqs:
+            desired -= r.sendTo(objs, desired, batchSize)
+            if desired <= 0:
                 break
-            time.sleep(min(self.RECV_POLL, left))
-        return received
+        # Well, return what we could get
+        return objs
 
 
-    def _updateQueued(self):
-        """Calls self.server.updateKeyQueued so that the database estimate
-        doesn't get screwed up.
+    def _updateCount(self):
+        """Updates server count with # of available items to send.
+
+        Whether or not this is called in a lock is unimportant, since 
+        self._requests is immutable.
         """
-        self.server.updateKeyQueued(self.key, 0)
+        priority = None
+        count = 0
+        for r in self._requests:
+            if priority != r.priority:
+                if priority is None:
+                    priority = r.priority
+                else:
+                    # Different priority, don't include in our count
+                    break
+            count += r.count
+        self.server.updateKeyCount(self.key, priority, count)
 
 
-class _ServerRequest(object):
-    """Responsible for waiting for a certain number of objects and storing
-    them.
+class _SendRequest(object):
+    """Responsible for keeping track of some objects to send as well as their
+    priority.  Represents a thread sitting on send()
     """
 
-    def __init__(self, batchSize, batchTime):
-        self._batchSize = batchSize
-        self._batchTime = batchTime
-        self._eventFirst = threading.Event()
-        self._eventFull = threading.Event()
+    def __init__(self, priority, objects):
+        self._priority = priority
+        self._objects = objects
+        self._sent = 0
+        self._total = len(objects)
+        self._eventDone = threading.Event()
         self._lock = threading.Lock()
         self._isClosed = False
-        self._results = []
-        self._results_doc = """List of objects retrieved"""
+
+
+    @property
+    def count(self):
+        return self._total - self._sent
 
 
     @property
@@ -90,75 +192,55 @@ class _ServerRequest(object):
         return self._isClosed
 
 
-    def addResults(self, objects):
-        """Accepts as many objects into _results as it can.  Allows a soft limit
-        of up to 50%; that is, if a request is waiting on 10 more objects, but
-        has capacity for 100 objects total, then if addResults() is called with
-        60 objects, it will take all 60.  61 objects, and it will only take 10.
+    @property
+    def priority(self):
+        return self._priority
 
-        Returns the number of objects accepted.
+
+    def sendTo(self, results, desired, batchSize):
+        """Add objects from ourselves into results as much as we can.  Allows
+        an overflow of 50%; that is, if we have more than desired objects in
+        our request, but batchSize * 1.5 > batchSize - desired + our objs, then
+        still return everything.
+
+        Returns the total # of objects added.
         """
         with self._lock:
-            lr = len(self._results)
-            if self._isClosed or lr >= self._batchSize:
-                # We won't accept any
-                return 0
-
-            # How many should we take?
-            nr = len(objects)
-            if lr + nr > self._batchSize * 1.5:
-                # Even with overflow, can't fit everything
-                nr = self._batchSize - lr
-
-            self._results.extend(objects[:nr])
-
-            # Regardless of if we had any or not, set the first event
-            self._eventFirst.set()
-            # If we're full, set that too
-            if len(self._results) >= self._batchSize:
-                self._eventFull.set()
-
-            return nr
-
-
-    def getResults(self):
-        """Gets the results of the request; can only be called once."""
-        with self._lock:
             if self._isClosed:
-                raise RuntimeError("Can only be called on open request")
-            assert not self._isClosed
-            self._isClosed = True
-            return self._results
+                return 0
+            nr = self._total - self._sent
+            if nr > desired and nr + batchSize - desired > batchSize * 1.5:
+                nr = desired
+            oldSent = self._sent
+            newSent = oldSent + nr
+            self._sent = newSent
+            if self._sent == self._total:
+                # We're done being serviced, close out and flag done
+                self._eventDone.set()
+                self._isClosed = True
+
+        # Commit the objects we're sending
+        results.extend(self._objects[oldSent:newSent])
+        return nr
 
 
     def wait(self, time):
-        """Wait for up to time seconds to get results triggered.
+        """Wait for up to time seconds to get everything sent
+        
+        Returns number of items actually sent before time ran out.
         """
-        if self._eventFirst.wait(time) is False:
+        if self._eventDone.wait(time) is False:
             with self._lock:
-                # Avoid race condition, check again once we have lock
-                if not self._eventFirst.isSet():
-                    self._isClosed = True # Accept no more
-                    raise TalkTimeoutError(
-                            "Waited {0} seconds, nothing received".format(time))
-        # We got at least one, wait up to batchTime for full, then return
-        self._eventFull.wait(self._batchTime)
+                # Avoid race condition, check again now that we have lock
+                if not self._eventDone.isSet():
+                    self._isClosed = True
+        return self._sent
 
 
 class _Server(object):
     """Local receive hub.  Responsible for accepting new messages and updating
     the TalkConnection.TALK_RECV_COLLECTION stats with our information.
     """
-
-    _AVAIL_TIMEOUT = 10.0
-    _AVAIL_TIMEOUT_doc = """Seconds to advertise being available to receive
-        keys of a specific object type when we get a call to recv().
-        """
-
-    _RECV_TIMEOUT = 60.0
-    _RECV_TIMEOUT_doc = """Default seconds before timing out any part of
-            send()"""
-
     _cls_lock = threading.Lock()
     _cls_lock_doc = """Class-level lock to get a server for a task db"""
 
@@ -177,91 +259,92 @@ class _Server(object):
 
     def __init__(self, talkDb):
         self._db = talkDb
-        self._colRecv = self._db[TalkConnection.TALK_RECV_COLLECTION]
-        self._recvId = uuid.uuid4().hex
-        self._pyroDaemon = Pyro4.Daemon(host = socket.gethostname())
-        self._pyroThread = threading.Thread(
-                target = self._pyroDaemon.requestLoop
-        )
-        self._pyroThread.daemon = True
-        self._pyroThread.start()
-        self._uri = self._pyroDaemon.register(self)
+        self._colSender = self._db[TalkConnection.TALK_SENDER_COLLECTION]
+        self._sendId = uuid.uuid4().hex
+        
+        self._uri, self._server = _rpcSpawnServer(self)
+
         self._lock = threading.Lock()
         self._keys = {}
 
 
-    def recvObjects(self, keyOrKeys, batchSize, batchTime, timeout):
-        """Called locally.  Waits for and receives objects on any of the 
-        keys specified.
+    def getObjects(self, key, desired, batchSize):
+        """Called from remote.  Looks at pending objects we have to send and
+        returns them.
 
-        keyOrKeys -- String or list of strings to receive one.
-        batchSize -- Desired # of objects; receive up to this many.  Not always
-                100% enforced; may return a few more.
-        batchTime -- After receiving first object, if we're not full, how long
-                should we wait to receive more objects?
-        timeout -- Maximum seconds to wait for anything before raising a
-                TalkTimeoutError
+        key -- Key to receive from
+        desired -- Desired # of items returned
+        batchSize -- Original # of items desired
 
         Returns an array of 0-batchSize objects.
         """
-        if isinstance(keyOrKeys, basestring):
-            keys = [ keyOrKeys ]
-        else:
-            keys = keyOrKeys
-        
-        request = _ServerRequest(batchSize, batchTime)
-        for key in keys:
-            dId = self._getColRecvId(key)
-            myUntil = datetime.datetime.utcnow() + datetime.timedelta(
-                    seconds = timeout)
-            d = self._colRecv.find_and_modify(
-                { '_id': dId }
-                , {
-                    # With modifiers, _id is implicit
-                    '$set': {
-                        'key': key
-                        , 'tsUntil': myUntil
-                        , 'batchSize': batchSize
-                        , 'uri': self._uri.asString()
-                    }
-                    , '$inc': { 'queued': 0 }
-                }
-                , upsert = True
-                , fields = { 'tsUntil': 1 }
-                , new = False # We want to see if we clobbered a newer tsUntil
-            )
-            if d and d.get('tsUntil', myUntil) > myUntil:
-                # There's another service here that is valid longer, keep it
-                self._colRecv.update({ '_id': dId }
-                    , { '$set': { 'tsUntil': d['tsUntil'] }})
-            kd = self._getKeyData(key)
-            kd.addRequest(request)
-
-        request.wait(timeout)
-        return request.getResults()
-
-
-    def sendObjects(self, key, objects):
-        """Called remotely.  Hands off objects to a local listener when asked
-        for more objects.
-        """
         kd = self._getKeyData(key)
-        return kd.recvObjects(objects)
+        return kd.getObjects(desired, batchSize)
 
 
-    def updateKeyQueued(self, key, queued):
-        """Called when we receive objects; used to adjust database stats so
+    def sendAndRecvObjects(self, priority, keysToObjects, recvKey,
+            recvBatch, recvFunction, timeout):
+        """Called locally; tries to send objects while simultaneously receiving.
+        Returns early if and only if all objects are sent and the receive batch
+        is full.
+
+        Returns a tuple: (numSent, objsReceived)
+        """
+        srs = []
+        for key, objs in keysToObjects.iteritems():
+            kd = self._getKeyData(key)
+            sr = _SendRequest(priority, objs)
+            kd.addRequest(sr)
+            srs.append(sr)
+
+        # Keep track of when we'll be done
+        e = time.time() + timeout
+
+        # Now do the recv
+        objsReceived = recvFunction(recvKey, batchSize = recvBatch,
+                batchTime = timeout, timeout = 0)
+
+        r = srs[0].wait(e - time.time())
+        for sr in srs[1:]:
+            r += sr.wait(0)
+        return (r, objsReceived)
+
+    def sendObjects(self, priority, keysToObjects, timeout):
+        """Called locally.  Hands off objects to a local listener when asked
+        to send objects.  Returns # actually sent
+        """
+        srs = []
+        for key, objs in keysToObjects.iteritems():
+            kd = self._getKeyData(key)
+            sr = _SendRequest(priority, objs)
+            kd.addRequest(sr)
+            srs.append(sr)
+
+        r = srs[0].wait(timeout)
+        for sr in srs[1:]:
+            r += sr.wait(0)
+        return r
+
+
+    def updateKeyCount(self, key, priority, count):
+        """Called when we want to send objects; used to adjust database stats so
         that we can keep track of which server is the busiest.
         """
-        self._colRecv.update({ '_id': self._getColRecvId(key) }
-            , { '$set': { 'queued': queued }}
-        )
+        dId = self._getColSendId(key)
+        newDoc = {
+            '_id': dId
+            , 'key': key
+            , 'priority': priority
+            , 'count': count
+            , 'uri': self._uri
+        }
+        self._colSender.update({ '_id': dId }, newDoc, upsert = True)
 
 
-    def _getColRecvId(self, key):
+    def _getColSendId(self, key):
         """Gets the _id for a document in self._colRecv for the given key.
         """
-        return self._recvId + '_' + key
+        return self._sendId + '_' + key
 
 
     def _getKeyData(self, key):
@@ -281,7 +364,7 @@ class _Proxy(object):
     def __init__(self, uri):
         self._uri = uri
         self._lock = threading.Lock()
-        self._proxy = Pyro4.Proxy(uri)
+        self._proxy = _rpcGetProxy(uri)
         self._timer = None
 
 
@@ -327,7 +410,7 @@ class _Proxy(object):
                 del TalkConnection._proxies[self._uri]
 
         # Get rid of the connection
-        self._proxy._pyroRelease()
+        _rpcCloseProxy(self._proxy)
 
 
     def release(self):
@@ -348,10 +431,27 @@ class _Proxy(object):
 class TalkConnection(object):
     """A connection to a talk database, which is always adjacent to an
     lgTask database.
+
+    lgTaskTalk is used to stream minor (non-task-level) work in a queue to
+    workers that can do the processing.  The major difference between using it
+    and something like redis as the intermediary is that lgTaskTalk's send()
+    method deliberately does not return until all of the data has sent or a 
+    timeout is reached.  In other words, if send() succeeds, the work is being
+    done *right now*.  If it fails, the application can decide whether it's 
+    overloaded and needs to back off, spawn more workers, or discard the data
+    entirely.
+
+    What you also gain over using something like redis is the ability to 
+    specify a priority when you are sending work along -- that is, if the
+    system enters a loaded state, high-priority work will still be done in
+    as timely a manner as possible.
+
+    And, it's faster than redis, at least in my tests.  But I might just suck
+    at using redis.
     """
 
-    TALK_RECV_COLLECTION = 'lgTaskTalkRecv'
-    TALK_HANDLER_COLLECTION = 'lgTaskTalkHandlers'
+    TALK_SENDER_COLLECTION = 'lgTaskTalkSender'
+    TALK_HANDLER_COLLECTION = 'lgTaskTalkHandler'
     
     _HMAC_KEY_DUMMY = (
         'lgTaskDummyHmac6&^#()6891625HUHuhefhzsJKH#2235&&!9-_'*71 + 'hwie3')
@@ -363,38 +463,89 @@ class TalkConnection(object):
     _proxies_doc = """{ uri : [ proxy ] } for all active proxies."""
 
     def __init__(self, taskConnection, sendTimeout = 60.0
-            , recvBatchTime = 0.4, recvTimeout = 10.0, hmacKey = None):
+            , recvBatchTime = 0.4, recvTimeout = 60.0):
         self._tc = taskConnection
-        self._colRecv = self._tc._database[self.TALK_RECV_COLLECTION]
+        self._colSender = self._tc._database[self.TALK_SENDER_COLLECTION]
         self._colHandler = self._tc._database[self.TALK_HANDLER_COLLECTION]
         self._sendTimeout = sendTimeout
         self._recvBatchTime = recvBatchTime
         self._recvTimeout = recvTimeout
 
-        # Global config for Pyro
-        Pyro4.config.COMPRESSION = True
-        Pyro4.config.HMAC_KEY = hmacKey or self._HMAC_KEY_DUMMY
 
-
-    def send(self, key, objects, timeout = None):
+    def send(self, key, objects, **kwargs):
         """Sends the given objects to a receiver with the specified key.
+
+        Returns # of objects sent, which will be len(objects).
+
+        Raises a TalkTimeoutError if not all objects are sent.
+        """
+        return self.sendMultiple({ key: objects }, **kwargs)
+
+
+    def sendMultiple(self, keysToObjects, timeout = None, priority = 0,
+            noRaiseOnTimeout = False):
+        """Sends the given objects to a receiver with the specified keys.
+
+        keysToObjects -- { key: [ objects ]} objects to send
+
+        Raises a TalkTimeoutError if not all objects are sent, unless 
+        noRaiseOnTimeout is specified as True.  
+
+        Returns the number of objects actully sent.
         """
         if timeout is None:
             timeout = self._sendTimeout
 
-        e = time.time() + timeout
-        totalSent = 0
-        while objects:
-            sent = self._sendBatch(key, objects)
-            objects = objects[sent:]
-            totalSent += sent
-            if time.time() >= e:
-                raise TalkTimeoutError('After sending {0} OK'.format(
-                        totalSent))
+        allObjs = sum([ len(o) for o in keysToObjects.itervalues() ])
+        if allObjs == 0:
+            # Nothing to do
+            return 0
+        if not hasattr(self, '_server'):
+            self._server = _Server.get(self._tc._database)
+        r = self._server.sendObjects(priority, keysToObjects, timeout)
+        if r != allObjs and not noRaiseOnTimeout:
+            raise TalkTimeoutError("Sent {0}".format(r))
+        return r
+
+
+    def map(self, key, objects, timeout = None, priority = 0):
+        """Sends the given objects to a receiver, and waits for a response
+        on a special queue.  Note that objects are sent in a tuple like:
+        
+        ( 'responseQueue', responseId, object )
+
+        They are then paired up before being returned to the caller.  For
+        use with tasks deriving from lgTask.talk.MappingTask; think things like
+        signing services or gateways to controlled resources.
+
+        Returns a list of ( objSent, objReceived ).  objReceived may be None
+        if an item did not receive a response in the timeout
+        """
+        if timeout is None:
+            timeout = self._sendTimeout
+
+        myResponseQueue = 'map-' + uuid.uuid4().hex
+        numObjs = len(objects)
+        objsToSend = [ ( myResponseQueue, i, o) 
+                for i, o in enumerate(objects) ]
+
+        if not hasattr(self, '_server'):
+            self._server = _Server.get(self._tc._database)
+        sent, objsReceived = self._server.sendAndRecvObjects(
+                priority, { key: objsToSend }
+                , recvKey = myResponseQueue, recvBatch = numObjs
+                , recvFunction = self.recv
+                , timeout = timeout
+        )
+        results = [ None ] * numObjs
+        for r in objsReceived:
+            i = r[0]
+            results[i] = ( objects[i], r[1] )
+        return results
 
 
     def recv(self, keyOrKeys, batchSize = 1, batchTime = None
-            , timeout = None):
+            , timeout = None, raiseOnTimeout = False):
         """Receive zero or up to batchSize objects with the specified key or 
         keys.
 
@@ -404,7 +555,11 @@ class TalkConnection(object):
         batchTime -- After the first item, wait this long for more items to
                 arrive before returning (even if we don't get batchSize items).
         timeout -- Maximum seconds to wait for next item, or raise a
-                TalkTimeoutError.  May be None for no limit.
+                TalkTimeoutError.  May be None for no limit.  May be 0 to
+                imply that we just want any items recv'd within batchTime
+                returned, even if that list is empty.
+        raiseOnTimeout -- If True, raise an Exception on timeout rather than
+                returning an empty list.
         """
         if batchTime is None:
             batchTime = self._recvBatchTime
@@ -413,13 +568,74 @@ class TalkConnection(object):
         if type(keys) != list:
             keys = [ keys ]
 
-        server = _Server.get(self._tc._database)
-        return server.recvObjects(
-                keyOrKeys
-                , batchSize = batchSize
-                , batchTime = batchTime
-                , timeout = timeout
-        )
+        e = None
+        isBatchOnly = False
+        if timeout <= 0:
+            isBatchOnly = True
+            e = time.time() + batchTime
+        elif timeout is not None:
+            e = time.time() + timeout
+
+        objs = []
+        while True:
+            left = batchSize - len(objs)
+            # Due to pymongo's find_and_modify not being developed enough to
+            # support a key_or_list for sort, we have to do a find..update 
+            # trick.
+            recvFrom = self._colSender.find_one(
+                {
+                    'key': { '$in': keys }
+                    , 'count': { '$gt': 0 }
+                }
+                , sort = [ ('priority', -1), ('count', -1) ]
+            )
+            if recvFrom is not None:
+                r = self._colSender.update(
+                    { '_id': recvFrom['_id'], 'count': recvFrom['count'] }
+                    , { '$inc': { 'count': -left } }
+                    , safe = True
+                )
+                if not r.get('updatedExisting'):
+                    # Someone else got there first
+                    continue
+                    '''
+            recvFrom = self._colSender.find_and_modify(
+                {
+                    'key': { '$in': keys }
+                    , 'count': { '$gt': 0 }
+                }
+                , {
+                    '$inc': { 'count': -left }
+                }
+                , sort = { 'count': -1 }
+            )
+            if recvFrom is not None:'''
+                with self._getAndLockProxy(recvFrom['uri']) as p:
+                    newObjs = p.getObjects(recvFrom['key'], left, batchSize)
+                objs.extend(newObjs)
+                if len(newObjs) == 0:
+                    # We didn't do anything...
+                    pass
+                elif len(objs) >= batchSize or batchTime <= 0.0:
+                    # Done!
+                    return objs
+                elif not isBatchOnly and left == batchSize:
+                    # These were the first objects
+                    e = time.time() + batchTime
+                    continue
+            else:
+                # There was nothing to do (no senders found), so sit around
+                timeLeft = e - time.time()
+                if timeLeft > 0:
+                    time.sleep(min(0.2, timeLeft * 0.5))
+                    continue
+
+            if time.time() >= e:
+                # We're done...
+                if raiseOnTimeout:
+                    raise TalkTimeoutError("Waited {0} seconds, nothing recv'd"
+                            .format(timeout))
+                return objs
 
 
     def registerHandler(self, key, taskClass, taskKwargs = None, max = 1):
@@ -465,7 +681,7 @@ class TalkConnection(object):
     def _getAndLockProxy(self, uri):
         """Gets and locks a proxy to the given URI.
 
-        While Pyro4.Proxy is thread-safe, we implement our own locking around
+        While rfoo is thread-safe, we implement our own locking around
         it to get an idea of how many concurrent requests we're pushing
         to each server.  Also, sendObjects() might block for a long time to
         prevent a bunch of round trips.
@@ -484,36 +700,4 @@ class TalkConnection(object):
             ps.append(p)
             return p
 
-    
-    def _sendBatch(self, key, objects):
-        """Send as many of objects as we can on the given key to a single
-        receiver.
-
-        Returns the number of objects actually sent.  If no objects are sent,
-        returns 0.
-        """
-        now = datetime.datetime.utcnow()
-        r = self._colRecv.find_and_modify(
-            {
-                'key': key
-                , 'tsUntil': { '$gte': now }
-            }
-            , {
-                '$inc': { 'queued': len(objects) }
-            }
-            , sort = [ ('queued', 1) ]
-            , new = True
-        )
-        if r is None:
-            if self._createHandler(key):
-                # Let it spin up
-                time.sleep(1.0)
-            else:
-                time.sleep(0.1)
-            return 0
-
-        count = r['batchSize']
-        with self._getAndLockProxy(r['uri']) as p:
-            p.sendObjects(key, objects[:count])
-        return count
 

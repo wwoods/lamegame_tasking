@@ -10,7 +10,6 @@ import uuid
 
 from lgTask.errors import *
 from lgTask.lib.timeInterval import TimeInterval
-from lgTask import talk
 
 def _decodePyMongo(value):
     try:
@@ -241,11 +240,12 @@ class Connection(object):
         """Returns an lgTask.talk.TalkConnection object with the same 
         database and encoding / decoding as this TaskConnection.
         """
+        from lgTask import talk
         tc = talk.TalkConnection(self, **kwargs)
         return tc
 
     def getWorking(self, host = False, taskClass = None):
-        """Get working task _id and tsStarted
+        """Get list of working tasks' _id and tsStart
 
         host -- If True, only on this host.
         """
@@ -255,7 +255,7 @@ class Connection(object):
         if taskClass:
             query['taskClass'] = taskClass
         return self._database[self.TASK_COLLECTION].find(
-                query, { '_id': 1, 'tsStarted': 1 }
+                query, [ 'tsStart' ]
         )
         
     def intervalTask(self, interval, taskClass, fromStart=False
@@ -682,13 +682,10 @@ class Connection(object):
             raise ValueError("Failed to parse: {0}".format(connString))
         
     def _initPyMongoDb(self, db):
-        # COPY the database, don't use the same one, in case we're a forked
-        # process.
-        self._connection = pymongo.Connection(
-                db.connection.host
-                , db.connection.port
-        )
-        self._database = self._connection[db.name]
+        # Use the same database; pymongo has good multiprocessing code, so
+        # it's ok if we're a forked process.
+        self._connection = db._connection
+        self._database = db
 
     @classmethod
     def _kwargsDecode(cls, kwargs):

@@ -19,6 +19,7 @@ import time
 import traceback
 from lgTask import Connection, Task, _runTask
 from lgTask.errors import ProcessorAlreadyRunningError
+from lgTask.lib import portalocker
 from lgTask.lib.interruptableThread import InterruptableThread
 from lgTask.lib.reprconf import Config
 from lgTask.lib.timeInterval import TimeInterval
@@ -42,7 +43,7 @@ class _JsonDecoder(json.JSONDecoder):
 
 
 class ProcessorLock(object):
-    """Tests against a lock folder with the given name."""
+    """Tests against a lock pidfile with the given name."""
 
     def __init__(self, path):
         self._path = os.path.abspath(path)
@@ -53,60 +54,60 @@ class ProcessorLock(object):
 
         If killExisting is specified, kill any process that has the lock.
         """
-        try:
-            os.makedirs(self._path)
-        except OSError, e:
-            if e.errno != errno.EEXIST:
-                raise
-            else:
-                pid = open(self._getPidFile(), 'r').read()
-                if os.path.exists('/proc/' + pid):
+        # So, we can just use the handy portalocker... which handles all of
+        # the pid management and whatnot for us.  Note that we must keep our
+        # file handle open for our duration... which doesn't necessarily work
+        # for us since we do some forking and whatnot that relies on keeping
+        # some file descriptors open.  SO we'll use the lock mechanism just to
+        # "grab" priority, then release it
+        # Note that we want to open the file for read / write if it exists 
+        # without truncating it, but create it if it doesn't exist.
+        # See http://stackoverflow.com/questions/10349781/how-to-open-read-write-or-create-a-file-with-truncation-possible
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT)
+        with os.fdopen(fd, "r+") as f:
+            try:
+                portalocker.lock(f, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.LockException:
+                # Someone else is writing to the file; they take precedence
+                raise ProcessorAlreadyRunningError()
+            
+            # Go to end of file and see if anything's been written
+            f.seek(0, 2)
+            if f.tell() != 0:
+                # Someone else has the pid file
+                f.seek(0)
+                try:
+                    oldPid = int(f.read())
+                    # See if they're still running; if they are, we'll yield
+                    os.kill(oldPid, 0)
+                    # If we get here, then they're alive and we need to let
+                    # them run... unless killExisting was specified
                     if not killExisting:
                         raise ProcessorAlreadyRunningError()
                     else:
                         try:
-                            os.kill(int(pid), signal.SIGKILL)
+                            os.kill(oldPid, signal.SIGKILL)
                         except OSError, e:
                             if e.errno != errno.ESRCH:
                                 raise
-                        time.sleep(0.01)
-                        # Since it might be dependent on our process and
-                        # will be defunct, we won't be able to tell if it's 
-                        # dead.  We can be reasonably sure that breaking the
-                        # lock is OK.
-                        self.release(force = True)
-                else:
-                    # The process is verified as dead
-                    self.release(force = True)
+                except OSError, e:
+                    if e.errno != errno.ESRCH:
+                        raise
+                    # They are no longer alive, so we can reasonably proceed
+                    # with taking over the lock
 
-                # If we get here, we want to retry
-                return self.acquire(killExisting=killExisting)
-        else:
-            with open(self._getPidFile(), 'w') as f:
-                f.write(str(os.getpid()))
+            # We now need to replace whatever contents there were with our
+            # pid, and then we've acquired it            
+            f.seek(0)
+            f.write(str(os.getpid()))
+            f.truncate()
 
 
-    def release(self, force = True):
-        """Releases the lock if the lock belongs to this process or force is
-        True.  Silently does not release the lock if it belongs to another
+    def release(self):
+        """Releases the lock under the assumption that it belongs to our
         process.
         """
-        try:
-            pid = open(self._getPidFile(), 'r').read()
-        except OSError, e:
-            # If no pid file, ok
-            if e.errno != errno.ENOENT:
-                raise
-        else:
-            if pid == os.getpid() or force:
-                # Clear it out!
-                os.remove(self._getPidFile())
-                os.rmdir(self._path)
-
-
-    def _getPidFile(self):
-        """Returns the absolute path to this lock's pid file."""
-        return os.path.join(self._path, 'lock.pid')
+        os.remove(self._path)
 
 
 class _ProcessorStop(Exception):
@@ -331,11 +332,13 @@ class Processor(object):
         self._thread = InterruptableThread(target=withProfile, args=(self,))
         self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout = 5.0):
         """Halt an asynchronously started processor (again, test only)
+
+        timeout -- Max # of seconds to run
         """
         self._stopOnNoTasks = True
-        self._thread.join(5)
+        self._thread.join(timeout)
         if self._thread.is_alive():
             self._thread.raiseException(_ProcessorStop)
 
@@ -495,7 +498,7 @@ class Processor(object):
                 continue
             if not os.path.exists(self._getPidFile(tid)):
                 # No pid file, mark failed
-                self.taskConnection.taskDied(tid, td['tsStarted'])
+                self.taskConnection.taskDied(tid, td['tsStart'])
 
         return now
 
@@ -633,8 +636,17 @@ class _ProcessorSlave(multiprocessing.Process):
 
 
     def execute(self, taskData):
-        """Queue the task to be ran."""
+        """Queue the task to be ran; this method is ONLY called by the 
+        Processor, not the ProcessorSlave.
+
+        It's a little sloppy to increment _runningCount here, but the worst
+        case scenario is that we'll overwrite immediately after they update
+        their running count (in which case we'll overestimate) or immediately
+        before, in which case they'll pick up the queued item from Queue.qsize()
+        anyway.
+        """
         self._queue.put(taskData)
+        self._runningCount.value += 1
 
 
     def getTaskCount(self):
@@ -653,6 +665,19 @@ class _ProcessorSlave(multiprocessing.Process):
         # pymongo connection to make sure we don't hold those sockets open
         self._processor.taskConnection.close()
 
+        # Also, ensure that the global talk variables weren't copied over.
+        # This only affects testing situations - that is, the normal processor
+        # process won't use talk.
+        import lgTask.talk
+        lgTask.talk.talkConnection.resetFork()
+        
+        canQsize = True
+        try:
+            self._queue.qsize()
+        except NotImplementedError:
+            # Oh Mac OS X, how silly you are sometimes
+            canQsize = False
+
         # Any tasks that we start only really need a teeny bit of stack
         thread.stack_size(1024 * 1024)
         try:
@@ -663,9 +688,6 @@ class _ProcessorSlave(multiprocessing.Process):
                         self._checkAccepting()
                     if not self._shouldContinue():
                         break
-
-                    # Update running count
-                    self._runningCount.value = len(self._running)
 
                     # Check tasks are running
                     self._checkRunning()
@@ -678,6 +700,12 @@ class _ProcessorSlave(multiprocessing.Process):
                     )
                     taskThread.start()
                     self._running.append(taskThread)
+                    
+                    # Update running count
+                    newCount = len(self._running)
+                    if canQsize:
+                        newCount += self._queue.qsize()
+                    self._runningCount.value = newCount
 
                 except Empty:
                     pass
