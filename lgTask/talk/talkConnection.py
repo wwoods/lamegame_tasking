@@ -18,7 +18,7 @@ try:
         
         Returns tuple: ( uri for connection, server object )
         """
-        class _RfooRpcClient(rfoo.BasicClient):
+        class _RfooRpcClient(rfoo.BaseHandler):
             def getObjects(self, *args, **kwargs):
                 return talkServer.getObjects(*args, **kwargs)
         server = rfoo.InetServer(_RfooRpcClient)
@@ -681,7 +681,7 @@ class TalkConnection(object):
     def _getAndLockProxy(self, uri):
         """Gets and locks a proxy to the given URI.
 
-        While rfoo is thread-safe, we implement our own locking around
+        While rpc proxies are thread-safe, we implement our own locking around
         it to get an idea of how many concurrent requests we're pushing
         to each server.  Also, sendObjects() might block for a long time to
         prevent a bunch of round trips.
