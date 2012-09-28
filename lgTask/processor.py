@@ -318,6 +318,9 @@ class Processor(object):
         """Run the Processor asynchronously for test cases.
         """
         self.NO_TASK_CHECK_INTERVAL = 0.01
+        self._thread = InterruptableThread(target=self.run)
+        self._thread.start()
+        '''
         def withProfile(self):
             import cProfile
             p = cProfile.Profile(builtins = False, subcalls = False)
@@ -328,9 +331,10 @@ class Processor(object):
             pr = pstats.Stats(p, stream = buffer)
             pr.sort_stats("cumulative")
             pr.print_stats()
-            open('tmp', 'w').write(buffer.getvalue())
+            open('processor.profile', 'w').write(buffer.getvalue())
         self._thread = InterruptableThread(target=withProfile, args=(self,))
         self._thread.start()
+        '''
 
     def stop(self, timeout = 5.0):
         """Halt an asynchronously started processor (again, test only)
