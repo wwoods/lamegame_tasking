@@ -61,6 +61,11 @@ def _runTask(
         success = True
         try:
             task.log = log
+            # We tell the task where its log file is only so that fetchLogTask
+            # doesn't need to be smart, and can just find other tasks running
+            # on the same machine by simply changing the taskId in the
+            # filename.
+            task._lgTask_logFile = logFile
             if setProcTitle:
                 setProcessTitle(task, processorHome)
 

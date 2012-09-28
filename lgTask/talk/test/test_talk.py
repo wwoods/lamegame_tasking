@@ -78,7 +78,36 @@ class TestTalk(TestCase):
         # Be sure to test with a larger number than Calculator.BATCH_SIZE
         input = [ '3+5', '3**5', '1/2.0' ] * 3
         r = self.talk.map('calc', input, timeout = 5.0)
-        expected = zip(input, [ 8, 3**5, 0.5 ]) * 3
+        expected = [ 8, 3**5, 0.5 ] * 3
         self.assertEqual(expected, r)
-
+        
+        
+    def test_getTaskLog(self):
+        taskId = self.tc.createTask('LoggerTask')
+        print("Started task " + taskId)
+        while self.tc.getTask(taskId)['tsStop'] is None:
+            time.sleep(0.1)
+        
+        log1 = self.tc.talkGetTaskLog(taskId, -1)
+        self.assertEqual(4*1024, len(log1))
+        lines = [ l.split(' ', 1)[1] for l in log1.split('\n')
+                if ' ' in l ]
+        expected = [ 'Message ' + str(i) for i in range(898, 1000) ]
+        expected += [ 'All done' ]
+        self.assertEqual(expected, lines)
+        
+        # The task spits out 1000 even-length messages, so the block size
+        # should be constant
+        
+        log0 = self.tc.talkGetTaskLog(taskId, -2)
+        self.assertEqual(4*1024, len(log0))
+        self.assertTrue('Message 839' in log0)
+        
+        logLast = self.tc.talkGetTaskLog(taskId, -10)
+        self.assertGreater(4*1024, len(logLast))
+        self.assertEqual('{"', logLast[:2])
+        self.assertTrue('Message 0' in logLast)
+        
+        logf = self.tc.talkGetTaskLog(taskId, -11)
+        self.assertEqual('', logf)
 

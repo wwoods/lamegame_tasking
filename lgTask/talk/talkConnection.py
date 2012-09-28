@@ -518,7 +518,7 @@ class TalkConnection(object):
         use with tasks deriving from lgTask.talk.MappingTask; think things like
         signing services or gateways to controlled resources.
 
-        Returns a list of ( objSent, objReceived ).  objReceived may be None
+        Returns a list like [ objReceived ].  objReceived may be None
         if an item did not receive a response in the timeout
         """
         if timeout is None:
@@ -540,7 +540,7 @@ class TalkConnection(object):
         results = [ None ] * numObjs
         for r in objsReceived:
             i = r[0]
-            results[i] = ( objects[i], r[1] )
+            results[i] = r[1]
         return results
 
 

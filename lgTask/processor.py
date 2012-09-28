@@ -480,7 +480,16 @@ class Processor(object):
             import tasks
         sys.path.pop(0)
 
-        tasksAvailable = { 'ScheduleAuditTask': ScheduleAuditTask }
+        myHost = socket.gethostname()
+        tasksAvailable = { 
+                'ScheduleAuditTask': ScheduleAuditTask
+                }
+        try:
+            import lgTask.talk
+            tasksAvailable['FetchLogTask-' + myHost] = lgTask.talk.FetchLogTask
+        except ImportError:
+            # OK, no talk, can't provide services
+            pass
         for name, obj in inspect.getmembers(tasks):
             if inspect.isclass(obj) and issubclass(obj, Task):
                 tasksAvailable[name] = obj

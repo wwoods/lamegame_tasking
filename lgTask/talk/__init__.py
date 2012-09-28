@@ -43,6 +43,7 @@ talk.recv(response key from send, timeout = X (expected processing time + n))
 """
 
 from error import TalkTimeoutError
+from fetchLogTask import FetchLogTask
 from mappingTask import MappingTask
 from talkConnection import TalkConnection
 

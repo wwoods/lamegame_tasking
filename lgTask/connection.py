@@ -199,7 +199,9 @@ class Connection(object):
                 , 'batch': True
                 , 'priority': priority
             }
-            self._createTask(now, taskClass, taskArgs, kwargs)
+            return self._createTask(now, taskClass, taskArgs, kwargs)
+        else:
+            return existing['_id']
 
 
     def close(self):
@@ -216,7 +218,7 @@ class Connection(object):
         """
         now = datetime.utcnow()
         kwargs = self._kwargsEncode(kwargs)
-        self._createTask(now, taskClass, { 'priority': priority }, kwargs)
+        return self._createTask(now, taskClass, { 'priority': priority }, kwargs)
 
     def delayedTask(self, runAt, taskClass, priority=0, **kwargs):
         """Creates a task that runs after a given period of time, or at 
@@ -231,7 +233,7 @@ class Connection(object):
           , 'priority': priority
         }
         kwargs = self._kwargsEncode(kwargs)
-        self._createTask(now, taskClass, taskArgs, kwargs)
+        return self._createTask(now, taskClass, taskArgs, kwargs)
 
     def getNewId(self):
         return uuid.uuid4().hex
@@ -243,9 +245,13 @@ class Connection(object):
         from lgTask import talk
         tc = talk.TalkConnection(self, **kwargs)
         return tc
+    
+    def getTask(self, taskId):
+        """Gets the document for the given task."""
+        return self._database[self.TASK_COLLECTION].find_one(taskId)
 
     def getWorking(self, host = False, taskClass = None):
-        """Get list of working tasks' _id and tsStart
+        """Get pymongo cursor of working tasks' _id and tsStart
 
         host -- If True, only on this host.
         """
@@ -338,7 +344,7 @@ class Connection(object):
             , 'schedule': True
             , 'priority': priority
         }
-        self._createTask(now, taskClass, taskArgs, kwargs)
+        return self._createTask(now, taskClass, taskArgs, kwargs)
 
     def _startTask(self, availableTasks):
         """Gets a task from our database and marks it in the database as 
@@ -398,6 +404,24 @@ class Connection(object):
                 break
 
         return task
+    
+    def talkGetTaskLog(self, taskId, blockIndex = 0, blockSize = 4*1024):
+        """Requires lgTask.talk to work, and to be on a local network with the
+        processors.  Gets the whole log for the given task.
+        
+        Note that if you'd like to reverse the log, simply start with 
+        blockIndex = -1, and continue going negative until the size returned
+        is less than blockSize.
+        
+        Internal note -- tested in test_talk.py, since it requires talk.
+        """
+        task = self._database[self.TASK_COLLECTION].find_one(taskId)
+        self.batchTask('now', 'FetchLogTask-' + task['host'])
+        talk = self.getTalk()
+        return talk.map('lgTaskLogs-' + task['host']
+                 , [ ( taskId, blockSize, blockIndex ) ]
+                 , timeout = 10.0
+        )[0]
 
     def taskDied(self, taskId, startedBefore):
         """Called when a task's process is detected as dead.  Updates the 
@@ -569,6 +593,7 @@ class Connection(object):
 
         taskColl = self._database[self.TASK_COLLECTION]
         taskColl.insert(taskDefaultArgs)
+        return taskDefaultArgs['_id']
                 
     @classmethod
     def _decodePyMongo(cls, connString):

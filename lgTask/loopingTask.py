@@ -20,6 +20,15 @@ class LoopingTask(Task):
         Task.__init__(self, *args, **kwargs)
         self._loopingTask_oldRun = self.run
         self.run = self._loopingTask_run
+        
+        
+    def shouldExit(self):
+        """Implementation of logic to abort before LOOP_TIME is finished.  For 
+        instance, when code changes are picked up on the Processor process,
+        this method should return True to indicate the LoopingTask should abort
+        so that it will get re-launched with the new code.
+        """
+        return False
 
 
     def _loopingTask_run(self):
@@ -30,7 +39,7 @@ class LoopingTask(Task):
         e = time.time() + self.LOOP_TIME
         while True:
             self._loopingTask_oldRun()
-            if time.time() >= e:
+            if time.time() >= e or self.shouldExit():
                 break
             if self.LOOP_SLEEP > 0:
                 time.sleep(self.LOOP_SLEEP)
