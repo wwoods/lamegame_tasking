@@ -486,7 +486,8 @@ class Processor(object):
                 }
         try:
             import lgTask.talk
-            tasksAvailable['FetchLogTask-' + myHost] = lgTask.talk.FetchLogTask
+            tasksAvailable['ProcessorInfoTask-' + myHost] = (
+                    lgTask.talk.ProcessorInfoTask)
         except ImportError:
             # OK, no talk, can't provide services
             pass

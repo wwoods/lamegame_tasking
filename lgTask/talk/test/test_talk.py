@@ -89,7 +89,9 @@ class TestTalk(TestCase):
             time.sleep(0.1)
         
         log1 = self.tc.talkGetTaskLog(taskId, -1)
-        self.assertEqual(4*1024, len(log1))
+        if len(log1) != 4*1024:
+            print("Got: " + str(log1))
+            self.fail("Log block was bad")
         lines = [ l.split(' ', 1)[1] for l in log1.split('\n')
                 if ' ' in l ]
         expected = [ 'Message ' + str(i) for i in range(898, 1000) ]

@@ -416,10 +416,10 @@ class Connection(object):
         Internal note -- tested in test_talk.py, since it requires talk.
         """
         task = self._database[self.TASK_COLLECTION].find_one(taskId)
-        self.batchTask('now', 'FetchLogTask-' + task['host'])
+        self.batchTask('now', 'ProcessorInfoTask-' + task['host'])
         talk = self.getTalk()
-        return talk.map('lgTaskLogs-' + task['host']
-                 , [ ( taskId, blockSize, blockIndex ) ]
+        return talk.map('lgProcessorInfo-' + task['host']
+                 , [ ( 'log', taskId, blockSize, blockIndex ) ]
                  , timeout = 10.0
         )[0]
 
