@@ -60,15 +60,27 @@ class DumpTaskMongo(DumpTaskBase):
 class DumpTaskRedis(DumpTaskBase):
     def run(self, key):
         port = 6379
-        # I tried redis with 2 instances, no faster.
-        #if key == '2':
-        #    port = 8888
+        if key == '2':
+            port = 8888
         import redis
         self._redis = redis.StrictRedis(port=port, db=0)
         DumpTaskBase.run(self, key)
         
     def dump(self, key, objs):
         self._redis.lpush(key, pickle.dumps(objs))
+
+
+class DumpTaskRabbit(DumpTaskBase):
+    def run(self, key):
+        import pika
+        self.conn = pika.BlockingConnection()
+        self.c = self.conn.channel()
+        return DumpTaskBase.run(self, key)
+
+
+    def dump(self, key, objs):
+        self.c.basic_publish(exchange = '', routing_key = key,
+            body = pickle.dumps(objs))
 
 
 class DumpTaskTalk(DumpTaskBase):
@@ -79,6 +91,11 @@ class DumpTaskTalk(DumpTaskBase):
 
     def dump(self, key, objs):
         self.tc.send(key, objs, timeout = 15.0, noRaiseOnTimeout=True)
+
+
+class DumpTaskFastest(lgTask.Task):
+    def dump(self, key, obj):
+        time.sleep(1.0)
 
 
 class ReadTaskBase(lgTask.Task):
@@ -124,8 +141,8 @@ class ReadTaskMongo(ReadTaskBase):
 class ReadTaskRedis(ReadTaskBase):
     def run(self, key):
         port = 6379
-        #if key == '2':
-        #    port = 8888
+        if key == '2':
+            port = 8888
         import redis
         self._redis = redis.StrictRedis(port=port, db=0)
         ReadTaskBase.run(self, key)
@@ -137,6 +154,21 @@ class ReadTaskRedis(ReadTaskBase):
             return []
         o = pickle.loads(o)
         return o
+
+
+class ReadTaskRabbit(ReadTaskBase):
+    def run(self, key):
+        import pika
+        self.conn = pika.BlockingConnection()
+        self.c = self.conn.channel()
+        ReadTaskBase.run(self, key)
+
+
+    def getObjs(self, key):
+        msg = self.c.basic_get(queue = key, no_ack = True)
+        if msg[2] is not None:
+            return pickle.loads(msg[2])
+        return []
 
 
 class ReadTaskTalk(ReadTaskBase):
@@ -171,13 +203,19 @@ def doTest():
     def getKey(index):
         return keys[index % len(keys)]
 
+    dumpTask = 'DumpTask' + testType.title()
+    readTask = 'ReadTask' + testType.title()
+
+    for i in range(x):
+        c.createTask(dumpTask, key = getKey(i))
+    for i in range(y):
+        c.createTask(readTask, key = getKey(i))
+
     if testType == 'talk':
-        # 16000 /s  
+        # talk - 16000/s
         ##OLD, PUSH BEHAVIOR: 2570 /s avg (before opt, needs run again)
-        for _ in range(x):
-            c.createTask("DumpTaskTalk", key = getKey(x))
-        for _ in range(y):
-            c.createTask("ReadTaskTalk", key = getKey(y))
+        # no setup needed
+        pass
     elif testType == 'redis':
         # 3500 /s avg
         import redis
@@ -185,20 +223,27 @@ def doTest():
         for k in keys:
             r.delete(k)
         r.connection_pool.disconnect()
-        for _ in range(x):
-            c.createTask("DumpTaskRedis", key=getKey(x))
-        for _ in range(y):
-            c.createTask("ReadTaskRedis", key=getKey(y))
+    elif testType == 'rabbitmq':
+        # 3300 /s avg
+        import puka
+        p = puka.Client()
+        p.wait(p.connect())
+        for k in keys:
+            try:
+                p.wait(p.queue_delete(k))
+            except puka.NotFound:
+                pass
+            # Define queues before tasks too... give it an advantage that way
+            p.wait(p.queue_declare(queue = k, durable = False))
     elif testType == 'mongo':
         # 2000 / s avg...
-        for _ in range(x):
-            c.createTask("DumpTaskMongo", key=getKey(x))
-        for _ in range(y):
-            c.createTask("ReadTaskMongo", key=getKey(y))
+        for i in range(x):
+            c.createTask("DumpTaskMongo", key=getKey(i))
+        for i in range(y):
+            c.createTask("ReadTaskMongo", key=getKey(i))
     elif testType == 'speed':
         # 400173 /s avg
-        for _ in range(y):
-            c.createTask("ReadTaskFastest", key=getKey(y))
+        pass
 
     a = time.time()
     runProcessor(TEST_TIME)

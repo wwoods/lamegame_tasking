@@ -4,7 +4,7 @@ from lgTask.talk import MappingTask
 
 class RouterTask(LoopingTask):
     LOOP_TIME = 10
-    def run(self):
+    def loop(self):
         talk = self.taskConnection.getTalk()
         vals = talk.recv('toRoute', batchSize = 2000)
         #queue = talk.getEnqueuer()

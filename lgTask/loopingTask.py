@@ -4,8 +4,10 @@ from lgTask.task import Task
 
 class LoopingTask(Task):
     """A Task that runs for at least a given period of time, repeatedly calling
-    the run() method for the duration (instead of calling it just once like 
-    normal).
+    the loop() method for the duration (instead of / in addition to calling 
+    run() just once like normal).  Note that if you re-define run(), you will
+    need to call LoopingTask.run(kwargs) at the end, where kwargs is anything
+    you want passed to each invocation of loop().
     
     Be sure to check out the constants at the top of the class - specifically,
     LOOP_TIME and LOOP_SLEEP.
@@ -16,10 +18,22 @@ class LoopingTask(Task):
     LOOP_SLEEP = 0
     LOOP_SLEEP_doc = """Seconds between run() calls.  Set to 0 to disable."""
     
-    def __init__(self, *args, **kwargs):
-        Task.__init__(self, *args, **kwargs)
-        self._loopingTask_oldRun = self.run
-        self.run = self._loopingTask_run
+    def loop(self, **kwargs):
+        raise NotImplementedError()
+
+
+    def run(self, **kwargs):
+        """The run() method for LoopingTasks.  The constructor for LoopingTask
+        silently replaces the run() method with this method, which calls the
+        run() defined in a derivative.
+        """
+        e = time.time() + self.LOOP_TIME
+        while True:
+            self.loop(**kwargs)
+            if time.time() >= e or self.shouldExit():
+                break
+            if self.LOOP_SLEEP > 0:
+                time.sleep(self.LOOP_SLEEP)
         
         
     def shouldExit(self):
@@ -31,15 +45,3 @@ class LoopingTask(Task):
         return False
 
 
-    def _loopingTask_run(self):
-        """The run() method for LoopingTasks.  The constructor for LoopingTask
-        silently replaces the run() method with this method, which calls the
-        run() defined in a derivative.
-        """
-        e = time.time() + self.LOOP_TIME
-        while True:
-            self._loopingTask_oldRun()
-            if time.time() >= e or self.shouldExit():
-                break
-            if self.LOOP_SLEEP > 0:
-                time.sleep(self.LOOP_SLEEP)

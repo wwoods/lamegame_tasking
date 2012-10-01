@@ -12,9 +12,6 @@ class MappingTask(lgTask.LoopingTask):
     TALK_KEY -- designates the key to recv from
 
     Define mapObjects(objs) to perform the mapping.
-
-    NOTE -- if BATCH_SIZE is less than a sender's amount, then the two will
-    get caught in a "I'm waiting on you" deadlock
     """
 
     BATCH_SIZE = 1
@@ -24,11 +21,11 @@ class MappingTask(lgTask.LoopingTask):
     _RECV_TIMEOUT = 60.0
     _SEND_TIMEOUT = 20.0
 
-    def __init__(self, *args, **kwargs):
-        lgTask.LoopingTask.__init__(self, *args, **kwargs)
+    def run(self, **kwargs):
         self._talk = self.taskConnection.getTalk()
         if self.TALK_KEY is None:
             raise ValueError("Need to specify TALK_KEY for MappingTask")
+        lgTask.LoopingTask.run(self, **kwargs)
 
 
     def mapObjects(self, objects):
@@ -38,7 +35,7 @@ class MappingTask(lgTask.LoopingTask):
         raise NotImplementedError()
 
 
-    def run(self):
+    def loop(self):
         objs = self._talk.recv(self.TALK_KEY, self.BATCH_SIZE,
                 self.BATCH_TIME, self._RECV_TIMEOUT)
         if not objs:
