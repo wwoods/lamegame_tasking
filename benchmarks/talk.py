@@ -15,7 +15,7 @@ from benchmarks.common import createAndChdir, runProcessor
 TEST_TIME = 15.0
 
 class DumpTaskBase(lgTask.Task):
-    def dump(self, objs):
+    def dump(self, key, objs):
         raise NotImplementedError()
 
 
@@ -38,7 +38,7 @@ class DumpTaskBase(lgTask.Task):
         return pkg
 
 
-    def run(self):
+    def run(self, key):
         """Dump!"""
         e = time.time() + TEST_TIME + 5.0
         # Dump values from 1 to 10, but cube them.  This way, if messages are
@@ -46,25 +46,29 @@ class DumpTaskBase(lgTask.Task):
         tsent = 0
         while time.time() < e:
             pkg = self.getObjects()
-            self.dump(pkg)
+            self.dump(key, pkg)
             tsent += len(pkg)
         #print("TOTAL SENT: {0}".format(tsent))
         self.taskConnection.createTask(self.__class__.__name__)
 
 
 class DumpTaskMongo(DumpTaskBase):
-    def dump(self, objs):
+    def dump(self, key, objs):
         self.taskConnection._database['test2'].insert({ 'objects': objs })
 
 
 class DumpTaskRedis(DumpTaskBase):
-    def __init__(self, *args, **kwargs):
-        DumpTaskBase.__init__(self, *args, **kwargs)
+    def run(self, key):
+        port = 6379
+        # I tried redis with 2 instances, no faster.
+        #if key == '2':
+        #    port = 8888
         import redis
-        self._redis = redis.StrictRedis(db=0)
+        self._redis = redis.StrictRedis(port=port, db=0)
+        DumpTaskBase.run(self, key)
         
-    def dump(self, objs):
-        self._redis.lpush('queue', pickle.dumps(objs))
+    def dump(self, key, objs):
+        self._redis.lpush(key, pickle.dumps(objs))
 
 
 class DumpTaskTalk(DumpTaskBase):
@@ -73,23 +77,23 @@ class DumpTaskTalk(DumpTaskBase):
         self.tc = self.taskConnection.getTalk()
 
 
-    def dump(self, objs):
-        self.tc.send('talkTest', objs, timeout = 15.0, noRaiseOnTimeout=True)
+    def dump(self, key, objs):
+        self.tc.send(key, objs, timeout = 15.0, noRaiseOnTimeout=True)
 
 
 class ReadTaskBase(lgTask.Task):
-    def getObjs(self):
+    def getObjs(self, key):
         raise NotImplementedError()
 
 
-    def run(self):
+    def run(self, key):
         """Read!"""
         e = time.time() + TEST_TIME + 5.0
         tr = 0
         while time.time() < e:
             getStart = time.time()
             try:
-                objs = self.getObjs()
+                objs = self.getObjs(key)
             except lgTask.talk.TalkTimeoutError:
                 continue
             getEnd = time.time()
@@ -109,7 +113,7 @@ class ReadTaskBase(lgTask.Task):
 
 
 class ReadTaskMongo(ReadTaskBase):
-    def getObjs(self):
+    def getObjs(self, key):
         cc = self.taskConnection._database['test2']
         objs = cc.find_and_modify(remove = True)
         if objs is None:
@@ -118,14 +122,17 @@ class ReadTaskMongo(ReadTaskBase):
 
 
 class ReadTaskRedis(ReadTaskBase):
-    def __init__(self, *args, **kwargs):
-        ReadTaskBase.__init__(self, *args, **kwargs)
+    def run(self, key):
+        port = 6379
+        #if key == '2':
+        #    port = 8888
         import redis
-        self._redis = redis.StrictRedis(db=0)
+        self._redis = redis.StrictRedis(port=port, db=0)
+        ReadTaskBase.run(self, key)
 
 
-    def getObjs(self):
-        o = self._redis.rpop('queue')
+    def getObjs(self, key):
+        o = self._redis.rpop(key)
         if o is None:
             return []
         o = pickle.loads(o)
@@ -138,8 +145,8 @@ class ReadTaskTalk(ReadTaskBase):
         self.tc = self.taskConnection.getTalk()
 
 
-    def getObjs(self):
-        objs = self.tc.recv('talkTest', batchSize = 200, timeout = 5.0)
+    def getObjs(self, key):
+        objs = self.tc.recv(key, batchSize = 200, timeout = 5.0)
         return objs
 
 
@@ -149,8 +156,8 @@ class ReadTaskFastest(ReadTaskBase):
 
 
 def doTest():
-    x = 4
-    y = 4
+    x = 6
+    y = 6
     print("""Benchmarking # of messages through pipe with {0} pushing 
             tasks and {1} pulling tasks with object sizes of 0.5 KB spread 
             over 3 keys and batch size of 200 objects""".format(x, y))
@@ -160,34 +167,38 @@ def doTest():
     #cc.save({ '_id': 'count', 'value': 0, 'count': 0 })
 
     testType = 'talk'
+    keys = [ '1', '2', '3' ]
+    def getKey(index):
+        return keys[index % len(keys)]
 
     if testType == 'talk':
         # 16000 /s  
         ##OLD, PUSH BEHAVIOR: 2570 /s avg (before opt, needs run again)
         for _ in range(x):
-            c.createTask("DumpTaskTalk")
+            c.createTask("DumpTaskTalk", key = getKey(x))
         for _ in range(y):
-            c.createTask("ReadTaskTalk")
+            c.createTask("ReadTaskTalk", key = getKey(y))
     elif testType == 'redis':
         # 3500 /s avg
         import redis
         r = redis.StrictRedis(db=0)
-        r.delete('queue')
+        for k in keys:
+            r.delete(k)
         r.connection_pool.disconnect()
         for _ in range(x):
-            c.createTask("DumpTaskRedis")
+            c.createTask("DumpTaskRedis", key=getKey(x))
         for _ in range(y):
-            c.createTask("ReadTaskRedis")
+            c.createTask("ReadTaskRedis", key=getKey(y))
     elif testType == 'mongo':
         # 2000 / s avg...
         for _ in range(x):
-            c.createTask("DumpTaskMongo")
+            c.createTask("DumpTaskMongo", key=getKey(x))
         for _ in range(y):
-            c.createTask("ReadTaskMongo")
+            c.createTask("ReadTaskMongo", key=getKey(y))
     elif testType == 'speed':
         # 400173 /s avg
         for _ in range(y):
-            c.createTask("ReadTaskFastest")
+            c.createTask("ReadTaskFastest", key=getKey(y))
 
     a = time.time()
     runProcessor(TEST_TIME)
