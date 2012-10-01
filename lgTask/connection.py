@@ -10,6 +10,7 @@ import uuid
 
 from lgTask.errors import *
 from lgTask.lib.timeInterval import TimeInterval
+from lgTask.stats import StatsInterface
 
 def _decodePyMongo(value):
     try:
@@ -45,6 +46,7 @@ class Connection(object):
     """Connects to a task database and performs operations with that database.
     """
     
+    STAT_COLLECTION = "lgTaskStat"
     TASK_COLLECTION = "lgTask"
     SCHEDULE_COLLECTION = "lgTaskSchedule"
 
@@ -64,7 +66,16 @@ class Connection(object):
     def _getDatabase(self):
         return self._database
     database = property(_getDatabase)
-    
+
+
+    _stats = None
+    def _getStatsInterface(self):
+        if self._stats is None:
+            self._stats = StatsInterface(self._database[self.STAT_COLLECTION])
+        return self._stats
+    stats = property(_getStatsInterface)
+
+
     def __init__(self, connString, **kwargs):
         """Create a new lgTask.Connection based off of a given connString or
         already initialized Connection.  
