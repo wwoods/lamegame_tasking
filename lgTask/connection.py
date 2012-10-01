@@ -643,6 +643,10 @@ class Connection(object):
                 ('state', 1)
                 , ('taskClass', 1)
         ))
+        desired.add((
+                ('tsStop', 1)
+                , 
+        ))
 
         indexes = col.index_information()
         # Clean up indexes
