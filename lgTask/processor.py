@@ -120,9 +120,16 @@ class Processor(object):
     """
 
     LOGFILE = 'processor.log'
-    NO_TASK_CHECK_INTERVAL = 0.5
-    NO_TASK_CHECK_INTERVAL__doc = 'Seconds to wait when we are not running ' \
-        + 'any tasks and cannot find a new task to run.'
+
+    LOAD_SLEEP_SCALE = 0.1
+    LOAD_SLEEP_SCALE_doc = """Seconds to wait for a running task to finish
+            before starting a parallel task.  Scaled by system load divided
+            by number of cores.  Set to 0 for tests, which will disable both
+            this and LOAD_SLEEP_SCALE_NO_TASK."""
+
+    LOAD_SLEEP_SCALE_NO_TASK = 4.0
+    LOAD_SLEEP_SCALE_NO_TASK_doc = """LOAD_SLEEP_SCALE for when we tried to
+            get a task but none were waiting"""
     
     def __init__(self, home='.'):
         """Creates a new task processor operating out of the current working
@@ -285,40 +292,47 @@ class Processor(object):
             lastScheduler = time.time()
             lastMonitor = 0.0
             lastStats = 0.0
+            loadMult = self.LOAD_SLEEP_SCALE
             while True:
                 lastScheduler = self._schedulerAudit(lastScheduler)
                 lastMonitor = self._monitorAudit(lastMonitor)
                 lastStats = self._statsAudit(lastStats)
                 try:
-                    self._startTaskQueue.put('any')
-                    next = self._startTaskQueue.get(timeout=5)
+                    load = os.getloadavg()[0] / multiprocessing.cpu_count()
+                    loadSleep = min(10.0, loadMult * load)
+                    if loadSleep > 0:
+                        # We need to wait for either a running task to stop
+                        # or our timeout to be met
+                        self._startTaskQueue.get(timeout=loadSleep)
                 except Empty:
                     # Timeout, no task start tokens are available.
                     # Time to run scheduler again.
                     # For now, we can safely assume that this always means that
                     # any tasks running are long-running, and can grab a new 
                     # token.
-                    self._startTaskQueue.put('any')
-                else:
-                    # We got a token, OK to start a new task
-                    try:
-                        result = self._consume()
-                    except _ProcessorStop:
-                        raise
-                    except (Exception, OSError):
-                        # _consume has its own error logging; just wait and
-                        # retry.
-                        time.sleep(self.NO_TASK_CHECK_INTERVAL)
-                        result = False
-                    if not result:
-                        if len(self._monitors) == 0:
-                            if self._stopOnNoTasks:
-                                # This is a test, we're not running anything,
-                                # so done
-                                break
-                            # Glitch condition, might as well start running
-                            # stuff again.
-                            self._startTaskQueue.put('any')
+                    pass
+
+                # We got a token or timed out, OK to start a new task
+                loadMult = self.LOAD_SLEEP_SCALE
+                try:
+                    result = self._consume()
+                except _ProcessorStop:
+                    raise
+                except (Exception, OSError):
+                    # _consume has its own error logging; just remove our 
+                    # extra sleep bonus and try again
+                    continue
+
+                if not result:
+                    # Failed to get a new task, avoid using cpu
+                    if self.LOAD_SLEEP_SCALE > 0:
+                        # Otherwise it's a test, so don't sleep
+                        loadMult = self.LOAD_SLEEP_SCALE_NO_TASK
+                    if len(self._monitors) == 0:
+                        if self._stopOnNoTasks:
+                            # This is a test, we're not running anything,
+                            # so done
+                            break
         except _ProcessorStop:
             self.error("Received _ProcessorStop")
         except Exception:
@@ -329,7 +343,7 @@ class Processor(object):
     def start(self):
         """Run the Processor asynchronously for test cases.
         """
-        self.NO_TASK_CHECK_INTERVAL = 0.01
+        self.LOAD_SLEEP_SCALE = 0.0
         self._thread = InterruptableThread(target=self.run)
         self._thread.start()
         '''
@@ -623,7 +637,7 @@ class Processor(object):
                 break
 
         # Try to add a new process
-        self._monitors.pop(tid)
+        self._monitors.pop(tid, None)
         self._startTaskQueue.put('any')
         self.log("Monitor finished {0}:{1}".format(tid, pid))
 

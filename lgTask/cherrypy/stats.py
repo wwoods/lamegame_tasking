@@ -513,6 +513,10 @@ var Graph = UiBase.extend({
         if ((xmax - xmin) / intervalLength > 20) {
             intervalLength *= 5;
         }
+        //30 days?
+        if ((xmax - xmin) / intervalLength > 20) {
+            intervalLength *= 6;
+        }
         //Now that we have an "optimal" length, try to align to the nearest 
         //whole time units!
         var intervalShift = 0;

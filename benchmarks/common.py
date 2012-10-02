@@ -53,6 +53,7 @@ def runProcessor(maxRunTime = 5.0):
     #ph = 'p{0}'.format(i)
     #os.mkdir(ph)
     #os.system('ln -s ../processor.cfg {0}/processor.cfg'.format(ph))
+    lgTask.Processor.LOAD_SLEEP_SCALE = 0.0
     p = lgTask.Processor(home = '.')
     p.start()
     if maxRunTime <= 0.0:
