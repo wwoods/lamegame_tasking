@@ -236,6 +236,14 @@ class Processor(object):
 
             self.log("Tasks loaded: {0}".format(self._tasksAvailable.keys()))
 
+            # Can we use psutil?
+            try:
+                import psutil
+                self._psutil = psutil
+            except ImportError:
+                self.log("No stats, install psutil for stats")
+                self._psutil = None
+
             # The advantage to multiprocessing is that since we are forking
             # the process, our libraries don't need to load again.  This
             # means that the startup time for new tasks is substantially
@@ -276,9 +284,11 @@ class Processor(object):
             self._startTaskQueue.put('any')
             lastScheduler = time.time()
             lastMonitor = 0.0
+            lastStats = 0.0
             while True:
                 lastScheduler = self._schedulerAudit(lastScheduler)
                 lastMonitor = self._monitorAudit(lastMonitor)
+                lastStats = self._statsAudit(lastStats)
                 try:
                     self._startTaskQueue.put('any')
                     next = self._startTaskQueue.get(timeout=5)
@@ -311,6 +321,8 @@ class Processor(object):
                             self._startTaskQueue.put('any')
         except _ProcessorStop:
             self.error("Received _ProcessorStop")
+        except Exception:
+            self.error("Unhandled error, exiting")
         finally:
             self._lock.release()
 
@@ -623,6 +635,48 @@ class Processor(object):
         now = time.time()
         if lastTime is None or now - lastTime > 120.0:
             self.taskConnection.batchTask('30 minutes', 'ScheduleAuditTask')
+            lastTime = now
+        return lastTime
+
+    def _statsAudit(self, lastTime):
+        """See if we need to log stats, and return new scheduled time.
+        """
+        if self._psutil is None:
+            return lastTime
+
+        now = time.time()
+        if lastTime is None or now - lastTime > 180.0:
+            stats = self.taskConnection.stats
+            cpu = self._psutil.cpu_percent()
+            load = os.getloadavg()[0]
+            pmem = self._psutil.phymem_usage()
+            cmem = self._psutil.cached_phymem()
+
+            memUtil = 100.0 - pmem[3] # pmem[3] is 0-100 % free
+            memCache = 100.0 * float(cmem) / pmem[0]
+
+            # Record maximum disk util with and without '/' partition
+            diskUseAll = 0.0
+            diskUseData = 0.0
+            for p in self._psutil.disk_partitions():
+                mount = p[1]
+                dUse = self._psutil.disk_usage(mount)[3]
+                diskUseAll = max(diskUseAll, dUse)
+                if mount != '/':
+                    diskUseData = max(diskUseData, dUse)
+
+            basePath = [ 'processors', socket.gethostname() ]
+            newStats = [
+                    dict(path = basePath + [ 'cpu-util' ], value = cpu)
+                    , dict(path = basePath + [ 'load' ], value = load)
+                    , dict(path = basePath + [ 'mem-util' ], value = memUtil)
+                    , dict(path = basePath + [ 'mem-cached' ], value = memCache)
+                    , dict(path = basePath + [ 'disk-util' ]
+                        , value = diskUseAll)
+                    , dict(path = basePath + [ 'disk-data-util' ]
+                        , value = diskUseData)
+                    ]
+            stats.addStats(newStats)
             lastTime = now
         return lastTime
 

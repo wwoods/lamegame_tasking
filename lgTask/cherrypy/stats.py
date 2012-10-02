@@ -1145,6 +1145,7 @@ $(function() {
             , 'paths': [ 
                 { 'path': 'sc-usage.{db}.*' }
                 , { 'path': 'sc-usage-user.{user}.loads' }
+                , { 'path': 'processors.{host}.*' }
             ]
         }
         return json.dumps(result)

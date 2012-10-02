@@ -23,7 +23,7 @@ class StatsInterface(object):
             each consecutive interval after that is the # of blocks in the
             previous layer to this layer.
 
-    sampleSuffix -- any stats whose names end in this will end up being treated
+    sampleSuffix -- any stats whose paths end in this will end up being treated
             as "samples" of a value, rather than a counter.  That is, if we
             get two values for the same block, the most recent value will be
             used.
@@ -49,10 +49,10 @@ class StatsInterface(object):
             self._col.save(self._schema)
 
 
-    def addStat(self, name, value, time = None):
+    def addStat(self, path, value, time = None):
         """Adds a single statistic.
 
-        name -- The key (period-delimited or a list of strings to be joined
+        path -- The key (period-delimited or a list of strings to be joined
                 by periods) for the stat.
         value -- The numeric value for the stat.
         time -- A datetime.datetime object when the stat occurred, or None to
@@ -60,12 +60,12 @@ class StatsInterface(object):
                 time.time() comes back in local time...
         """
         timeVal = self._getTimeVal(time)
-        if isinstance(name, list):
-            name = '.'.join([ str(n).replace('.', '-') for n in name ])
+        if isinstance(path, list):
+            path = '.'.join([ str(n).replace('.', '-') for n in path ])
 
-        schema = self._getSchemaFor(name)
+        schema = self._getSchemaFor(path)
         myType = 'add'
-        if name.endswith(schema['sampleSuffix']):
+        if path.endswith(schema['sampleSuffix']):
             myType = 'set'
 
         # index of each block we're writing to in each interval
@@ -99,7 +99,7 @@ class StatsInterface(object):
             fields[block] = { '$slice': [ blockInfo[0], 1 ] }
 
         r = self._col.find_and_modify(
-            { '_id': name, 'tsLatest': { '$lte': timeVal }}
+            { '_id': path, 'tsLatest': { '$lte': timeVal }}
             , updates
             , fields = fields
         )
@@ -144,7 +144,7 @@ class StatsInterface(object):
                         # Remove the old counter amount for this block
                         incs[key] = -r['block'][slayer][0]
                 self._col.update(
-                    { '_id': name }
+                    { '_id': path }
                     , updates
                 )
                         
@@ -153,20 +153,20 @@ class StatsInterface(object):
         else:
             # Can we update a document updated after us?
             r = self._col.find_and_modify(
-                { '_id': name, 'tsLatest': { '$gte': timeVal }}
+                { '_id': path, 'tsLatest': { '$gte': timeVal }}
                 , updates
                 , fields = fields
             )
             if r is None:
                 # r is None, meaning this stat doesn't exist.  Create a new
                 # stat and insert it
-                if not self._tryNewStat(schema, name, timeVal):
+                if not self._tryNewStat(schema, path, timeVal):
                     # Insert failed, meaning someone else beat us.  Run
                     # a normal update
-                    return self.addStat(name, value, time = time)
+                    return self.addStat(path, value, time = time)
                 else:
                     # Still run a normal update to add our stat
-                    return self.addStat(name, value, time = time)
+                    return self.addStat(path, value, time = time)
             # if r is not None, then we're ok.  The document's already been
             # updated after us, meaning that the bucket logic has already
             # been applied.  So no worries
@@ -316,8 +316,8 @@ class StatsInterface(object):
         return (time - self._epoch).total_seconds()
 
 
-    def _tryNewStat(self, schema, name, timeVal, randomize = False):
-        """Try to insert a new document with the given schema and stat name.
+    def _tryNewStat(self, schema, path, timeVal, randomize = False):
+        """Try to insert a new document with the given schema and stat path.
 
         Return True if new stat made ok, False if it already was made.
 
@@ -334,7 +334,7 @@ class StatsInterface(object):
                 blocks[slayer] = [ (i % 100) + 10 for i in xrange(data[1]) ]
             
         newDoc = {
-            '_id': name
+            '_id': path
             , 'tsLatest': timeVal
             , 'block': blocks
         }
