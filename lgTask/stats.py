@@ -71,6 +71,12 @@ class StatsInterface(object):
         # index of each block we're writing to in each interval
         blocks = self._getBlocks(timeVal, schema['intervals'])
 
+        # From this point forward, for updates, we'll use the block's rounded
+        # timeVal (the minimum in the bucket) for our timestamp.  This prevents
+        # unnecessary amounts of shifting
+        oldTimeVal = timeVal
+        timeVal = blocks[0][3]
+
         # Mongodb syntax - to get fields, use 
         # find(fields = { 'valArray': { '$slice': [ idx, len ] }})
 
@@ -174,16 +180,23 @@ class StatsInterface(object):
             self.addStat(**s)
 
 
-    def getStat(self, stat, start, stop):
+    def getStat(self, stat, start, stop, timesAreUtcSeconds = False):
         """Get stats between start and stop (datetime objects).  Returns a dict:
 
         { 'values': [ val1, val2, ... ], 'tsStart': start, 'tsInterval': time
                 between buckets }
+
+        timesAreUtcSeconds -- A "I know what I'm doing" flag to not treat
+                start and stop as datetime objects, but as second since epoch.
         """
 
         tsNow = self._getTimeVal(None)
-        tsStart = self._getTimeVal(start)
-        tsStop = self._getTimeVal(stop)
+        if not timesAreUtcSeconds:
+            tsStart = self._getTimeVal(start)
+            tsStop = self._getTimeVal(stop)
+        else:
+            tsStart = start
+            tsStop = stop
 
         schema = self._getSchemaFor(stat)
         blocksStart = self._getBlocks(tsStart, schema['intervals'])
@@ -247,9 +260,20 @@ class StatsInterface(object):
             return {
                 'values': data
                 , 'tsStart': blockStart[3]
+                , 'tsStop': blockStop[3]
                 , 'tsInterval': blockStart[2]
             }
         raise ValueError("stop is too far in the past: {0}".format(past))
+
+
+    def listStats(self, tsLatest = None):
+        """Return a list of all available stats.
+        """
+        query = { '_id': { '$ne': '_schema' }}
+        if tsLatest is not None:
+            tsLatest = self._getTimeVal(tsLatest)
+            query['tsLatest'] = { '$gte': tsLatest }
+        return [ d['_id'] for d in self._col.find(query, fields = []) ]
 
 
     def _getBlocks(self, timeVal, schemaIntervals):
@@ -284,6 +308,9 @@ class StatsInterface(object):
         """
         if time is None:
             time = datetime.datetime.utcnow()
+        elif isinstance(time, float):
+            # Assuming it's already seconds since epoch, UTC
+            return time
         elif not isinstance(time, datetime.datetime):
             raise ValueError("time must be datetime.datetime")
         return (time - self._epoch).total_seconds()

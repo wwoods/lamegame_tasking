@@ -47,7 +47,7 @@ class LgTaskPage(Control):
         NoIndexControl().appendto(p) #Don't index auth pages...
         CssResetControl().appendto(p)
         self.DefaultStyle().appendto(p)
-        center = CenterControl(width='800px').appendto(p)
+        center = CenterControl(width='auto').appendto(p)
         form = DivControl(cls="lg-form").appendto(center)
         form.extend(children)
 
@@ -89,6 +89,7 @@ class LgMenuControl(Control):
             def prerender(self, kwargs):
                 kwargs['path'] = get_abs_path(kwargs['path'])
         self.append(Link(path='/', name='Dashboard'))
+        self.append(Link(path='/stats', name='Stats'))
         #self.append(Link(path='/', name='Dashboard'))
 
 

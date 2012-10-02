@@ -2,7 +2,10 @@
 import cherrypy
 import datetime
 import lgTask
+from lgTask.cherrypy.staticServer import StaticServer
+from lgTask.cherrypy.stats import StatsRoot
 from lgTask.lib.timeInterval import TimeInterval
+import os
 
 from controls import *
 
@@ -41,14 +44,20 @@ class LgTaskRoot(object):
     """Cherrypy-based object for serving up stats about a cluster of lgTask
     processors.
     """
+
+    static = StaticServer(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__))
+            , 'static'))
     
     def __init__(self, connection):
         """Creates a root object capable of serving up information about the
         given lgTask.Connection and its processors.
         """
         self._conn = connection
-        
-    
+        self.stats = StatsRoot(self._conn)
+
+
     @cherrypy.expose
     def index(self):
         body = LgTaskPage()
