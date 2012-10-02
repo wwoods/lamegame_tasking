@@ -126,6 +126,10 @@ class StatsInterface(object):
                 for layer, oldBlock in enumerate(oldBlocks):
                     # We don't want to update the record that corresponds
                     # with the old tsLatest, since it's already up-to-date
+                    if oldBlock[0] == blocks[layer][0]:
+                        # This layer didn't roll over
+                        continue
+
                     oldIndex = oldBlock[0]
                     oldIndex += 1
                     while oldIndex != blocks[layer][0]:
@@ -197,6 +201,10 @@ class StatsInterface(object):
         else:
             tsStart = start
             tsStop = stop
+
+        # For "now", we actually want to use the latter of now or tsStop, 
+        # since the client might be requesting data in the future
+        tsNow = max(tsNow, tsStop)
 
         schema = self._getSchemaFor(stat)
         blocksStart = self._getBlocks(tsStart, schema['intervals'])

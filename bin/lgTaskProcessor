@@ -33,6 +33,13 @@ if __name__ == '__main__':
         killExisting = True
 
     proc = lgTask.Processor(home)
+    try:
+        # Some testing methods clear it out, meaning there won't be a logs
+        # dir.  But, when we set process title, we log something.  So we 
+        # need this dir.
+        os.makedirs(os.path.join(home, 'logs'))
+    except OSError:
+        pass
     setProcessTitle(proc)
     proc.run(killExisting=killExisting)
 

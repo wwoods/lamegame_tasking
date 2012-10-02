@@ -35,13 +35,14 @@ class TestTalk(TestCase):
             f.write('threaded = True\n')
             f.write('taskDatabase = "{0}"\n'.format(cls.MONGODB_URL))
             f.write('pythonPath = [ "../" ]\n')
-        cls.p = lgTask.Processor(home = ph)
-        cls.p.start()
+        # Put it in an array to get around python thinking it should be
+        # bound to this class
+        cls.procKill = [ lgTask.Processor.fork(home = ph) ]
 
 
     @classmethod
     def tearDownClass(cls):
-        cls.p.stop(timeout = 0)
+        cls.procKill[0]()
 
 
     def setUp(self):
@@ -87,6 +88,11 @@ class TestTalk(TestCase):
         print("Started task " + taskId)
         while self.tc.getTask(taskId)['tsStop'] is None:
             time.sleep(0.1)
+
+        logFirst = self.tc.talkGetTaskLog(taskId, 0)
+        if len(logFirst) != 4*1024 or logFirst[0] != '{':
+            print("Got: " + str(logFirst))
+            self.fail("Log block was bad")
         
         log1 = self.tc.talkGetTaskLog(taskId, -1)
         if len(log1) != 4*1024:

@@ -44,17 +44,43 @@ class TestStats(TestCase):
         v = [ 20 ]
         n = [ self.now ]
         expected = []
-        def add():
-            self.stats.addStat('test-val', v[0], time = n[0])
+        expectedDaySet = []
+        expectedDayAdd = []
+        expectedDayAddVal = [0]
+        def add(i):
+            self.stats.addStat('test', v[0], time = n[0])
+            # Add to the "set" value twice, to ensure it is setting and not
+            # summing
+            self.stats.addStat('test-sample', v[0], time = n[0])
+            self.stats.addStat('test-sample', v[0], time = n[0])
             expected.append(v[0])
+            expectedDayAddVal[0] += v[0]
+            if i % 5 == 4:
+                expectedDaySet.append(v[0])
+                expectedDayAdd.append(expectedDayAddVal[0])
+                expectedDayAddVal[0] = 0
             v[0] += 1
             n[0] += datetime.timedelta(seconds = 3 * 60.0)
-        for _ in range(20):
-            add()
-        r = self.stats.getStat('test-val', self.now, n[0])
+        for i in range(20):
+            add(i)
+        r = self.stats.getStat('test', self.now, n[0])
+        r2 = self.stats.getStat('test-sample', self.now, n[0])
         expected.append(0)
         self.assertEqual(expected, r['values'])
+        self.assertEqual(expected, r2['values'])
         self.assertEqual(180.0, r['tsInterval'])
+
+        # Test the next interval up
+        # (Note we add 1 since getStat() returns inclusive for both bounds)
+        for i in range(24*60*60 / (15*60) - len(expectedDayAdd) + 1):
+            expectedDayAdd.append(0)
+            expectedDaySet.append(0)
+        r = self.stats.getStat('test', self.now
+            , self.now + datetime.timedelta(seconds = 24*60*60))
+        self.assertEqual(expectedDayAdd, r['values'])
+        r2 = self.stats.getStat('test-sample', self.now
+            , self.now + datetime.timedelta(seconds = 24*60*60))
+        self.assertEqual(expectedDaySet, r2['values'])
 
 
     def test_noDataForAwhile(self):

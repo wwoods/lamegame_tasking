@@ -35,7 +35,7 @@ class ProcessorInfoTask(MappingTask):
         with open(os.path.join(logPath, taskId + '.log')) as f:
             if blockIndex >= 0:
                 f.seek(blockSize * blockIndex)
-                results.append(f.read(blockSize))
+                return f.read(blockSize)
             else:
                 f.seek(0, 2)
                 end = f.tell()

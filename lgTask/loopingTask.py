@@ -1,4 +1,5 @@
 
+import os
 import time
 from lgTask.task import Task
 
@@ -17,7 +18,12 @@ class LoopingTask(Task):
     LOOP_TIME_doc = """Seconds to run for in total"""
     LOOP_SLEEP = 0
     LOOP_SLEEP_doc = """Seconds between run() calls.  Set to 0 to disable."""
-    
+
+    def __init__(self, *args, **kwargs):
+        Task.__init__(self, *args, **kwargs)
+        self._parentPid = os.getppid()
+   
+
     def loop(self, **kwargs):
         raise NotImplementedError()
 
@@ -41,7 +47,10 @@ class LoopingTask(Task):
         instance, when code changes are picked up on the Processor process,
         this method should return True to indicate the LoopingTask should abort
         so that it will get re-launched with the new code.
+
+        Default implementation will abort the task if parent pid has changed,
+        since that means we may have new code to load.
         """
-        return False
+        return (os.getppid() != self._parentPid)
 
 
