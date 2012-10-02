@@ -42,7 +42,7 @@ class StatsInterface(object):
                                 , [5, 15] # 15 min @ 15 days
                                 , [24, 365] # 6 hr @ 1 yr
                             ]
-                            , 'sampleSuffix': '-total'
+                            , 'sampleSuffix': '-sample'
                         }
                     ]
                 }
@@ -263,7 +263,7 @@ class StatsInterface(object):
                 , 'tsStop': blockStop[3]
                 , 'tsInterval': blockStart[2]
             }
-        raise ValueError("stop is too far in the past: {0}".format(past))
+        raise ValueError("stop is too far in the past: {0}".format(stop))
 
 
     def listStats(self, tsLatest = None):

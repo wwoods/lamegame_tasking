@@ -667,13 +667,15 @@ class Processor(object):
 
             basePath = [ 'processors', socket.gethostname() ]
             newStats = [
-                    dict(path = basePath + [ 'cpu-util' ], value = cpu)
-                    , dict(path = basePath + [ 'load' ], value = load)
-                    , dict(path = basePath + [ 'mem-util' ], value = memUtil)
-                    , dict(path = basePath + [ 'mem-cached' ], value = memCache)
-                    , dict(path = basePath + [ 'disk-util' ]
+                    dict(path = basePath + [ 'cpu-util-sample' ], value = cpu)
+                    , dict(path = basePath + [ 'load-sample' ], value = load)
+                    , dict(path = basePath + [ 'mem-util-sample' ]
+                        , value = memUtil)
+                    , dict(path = basePath + [ 'mem-cached-sample' ]
+                        , value = memCache)
+                    , dict(path = basePath + [ 'disk-util-sample' ]
                         , value = diskUseAll)
-                    , dict(path = basePath + [ 'disk-data-util' ]
+                    , dict(path = basePath + [ 'disk-data-util-sample' ]
                         , value = diskUseData)
                     ]
             stats.addStats(newStats)

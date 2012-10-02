@@ -280,8 +280,6 @@ var Graph = UiBase.extend({
         var movingTime = srcTime;
         //the start of our current point:
         var movingTimeBase = movingTime;
-        srcIndex += 1;
-        srcTime += srcInterval;
         for (var i = 0, m = pointTimes.length; i < m; i++) {
             //We're actually going to compute a moving sum of partial data 
             //points - that is, we assume our counters are uniformly distributed
@@ -750,7 +748,7 @@ var Stat = Class.extend({
         this.type = params.type;
         if (this.type == undefined) {
             this.type = 'count';
-            if (/-total$/.test(this.path)) {
+            if (/-sample$/.test(this.path)) {
                 this.type = 'total';
             }
         }

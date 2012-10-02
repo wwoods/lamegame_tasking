@@ -23,18 +23,38 @@ class TestStats(TestCase):
         self.stats.addStat('test', 54, time = self.now)
         self.stats.addStat('test', 57, time = self.now)
         self.stats.addStat('test', 12, time = self.nmin)
-        self.stats.addStat('test-total', 120, time = self.now)
-        self.stats.addStat('test-total', 150, time = self.now)
-        self.stats.addStat('test-total', 60, time = self.now)
-        self.stats.addStat('test-total', 30, time = self.nmin)
+        self.stats.addStat('test-sample', 120, time = self.now)
+        self.stats.addStat('test-sample', 150, time = self.now)
+        self.stats.addStat('test-sample', 60, time = self.now)
+        self.stats.addStat('test-sample', 30, time = self.nmin)
         r = self.stats.getStat('test', start = self.now, stop = self.nmin)
         self.assertEqual(2, len(r['values']))
         self.assertEqual(111, r['values'][0])
         self.assertEqual(12, r['values'][1])
-        r = self.stats.getStat('test-total', start = self.now
+        r = self.stats.getStat('test-sample', start = self.now
                 , stop = self.nmin)
         self.assertEqual(60, r['values'][0])
         self.assertEqual(30, r['values'][1])
+
+
+    def test_series(self):
+        self.now = datetime.datetime.utcfromtimestamp(
+            self.stats._getBlocks(self.stats._getTimeVal(None), [(6*60*60,100)]
+                )[0][3] + 1.5)
+        v = [ 20 ]
+        n = [ self.now ]
+        expected = []
+        def add():
+            self.stats.addStat('test-val', v[0], time = n[0])
+            expected.append(v[0])
+            v[0] += 1
+            n[0] += datetime.timedelta(seconds = 3 * 60.0)
+        for _ in range(20):
+            add()
+        r = self.stats.getStat('test-val', self.now, n[0])
+        expected.append(0)
+        self.assertEqual(expected, r['values'])
+        self.assertEqual(180.0, r['tsInterval'])
 
 
     def test_noDataForAwhile(self):
