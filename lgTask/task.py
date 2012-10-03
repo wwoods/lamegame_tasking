@@ -68,6 +68,8 @@ class Task(object):
         """Starts the task with the given kwargs (calls the Task class' run()
         method.
         """
+        # Note - this is kept here in case I'm wrong and it is used...
+        raise NotImplementedError("THIS IS OBSOLETE AND SHOULD NOT BE USED")
         if self._thread is not None:
             raise Exception("start() already called on this Task")
         
@@ -95,6 +97,7 @@ class Task(object):
         """Called when the task finishes; must be callable multiple times,
         since StopTaskError can be raised in the middle of it.
         """
+        raise NotImplementedError("Obsolete; same as start()")
         self.taskConnection.taskStopped(self, success, self._logs[-1])
         
         

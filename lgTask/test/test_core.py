@@ -129,19 +129,27 @@ class TestCore(TestCase):
         self.conn.batchTask('1 second', 'IncValueTask', id='a')
         self.conn.batchTask('1 second', 'IncValueTask', id='b')
 
-    def test_batchMoveLog(self):
-        self.conn.batchTask('now', 'IncValueTask', taskName='j', id='c')
+    def test_batchHistory(self):
+        bTid = self.conn.batchTask('now', 'IncValueTask', taskName='j', id='c')
         startTime = datetime.datetime.utcnow()
         p = lgTask.Processor()
         p.start()
         try:
             time.sleep(0.5)
             taskDb = self.conn.database[self.conn.TASK_COLLECTION]
-            task = taskDb.find_one({ 'taskClass': 'IncValueTask' })
-            tid = task['_id']
-            self.assertNotEqual('IncValueTask-j', tid)
+            tasks = { t['_id']: t for t in taskDb.find(
+                { 'taskClass': 'IncValueTask' }
+            ) }
+            # Should be a main task, and a splinter task
+            for tid in tasks.iterkeys():
+                if tid != bTid:
+                    splinterId = tid
+                    break
+            task = tasks[splinterId]
+            self.assertNotEqual('IncValueTask-j', splinterId)
             self.assertTrue(task['tsStop'] >= startTime, "Wrong task")
-            self.assertTrue(os.path.isfile('logs/{0}.log'.format(tid)))
+            self.assertTrue(os.path.isfile('logs/{0}.log'.format(splinterId)))
+            self.assertFalse(os.path.isfile('logs/{0}.log'.format(bTid)))
         finally:
             p.stop()
 
@@ -250,6 +258,13 @@ class TestCore(TestCase):
                 , delay=1.0
             )
 
+            # Expected time frame:
+            # 0 - 1st task launched
+            # 1 - 1st task does operation and exits, scheduling 2nd
+            # 2 - 2nd task launched
+            # 3 - 2nd task does operation..
+            # 4 - 3rd task launched
+
             #0.0
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(0, d['value'])
@@ -274,11 +289,15 @@ class TestCore(TestCase):
             d = db.find_one({ 'id': 'a' })
             self.assertEqual(2, d['value'])
 
-            # At this point, we should have run 2 tasks and have a 3rd queued
+            # At this point, we should have run 2 tasks and have a 3rd in its
+            # sleep; remember that the non-splintered task takes up a slot too
             taskDb = self.conn._database[self.conn.TASK_COLLECTION]
             spec = { 'taskClass': { '$ne': 'ScheduleAuditTask' } }
-            self.assertEqual(3, taskDb.find(spec).count())
-
+            tasks = taskDb.find(spec)
+            if 4 != tasks.count():
+                for t in tasks:
+                    print("Found: {0}".format(t['taskClass']))
+                self.fail("Expected 2 tasks executed and a 3rd queued")
         finally:
             p.stop()
 
@@ -467,4 +486,25 @@ class TestCore(TestCase):
             self.assertEqual(10, d['value'])
         finally:
             p.stop()
+
+
+    def test_taskStopped_multiple(self):
+        # Ensure that taskStopped being called multiple times only effects
+        # the first one
+        c = self.conn._database[self.conn.TASK_COLLECTION]
+        tid = self.conn.createTask("IncValueTask")
+        taskData = c.find_one(tid)
+
+        self.conn.taskStopped(tid, taskData, False, 'First error')
+        d1 = c.find_one(tid)
+        self.assertEqual('error', d1['state'])
+        self.assertEqual('First error', d1['lastLog'])
+        self.conn.taskStopped(tid, taskData, False, 'Second error')
+        d2 = c.find_one(tid)
+        self.assertEqual('error', d2['state'])
+        self.conn.taskStopped(tid, taskData, True, 'OK!')
+        d3 = c.find_one(tid)
+        self.assertEqual('error', d3['state'])
+        self.assertEqual('First error', d3['lastLog'])
+
 

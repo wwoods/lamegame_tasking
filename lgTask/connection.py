@@ -264,11 +264,15 @@ class Connection(object):
     def getWorking(self, host = False, taskClass = None):
         """Get pymongo cursor of working tasks' _id and tsStart
 
-        host -- If True, only on this host.
+        host -- If True, only on this host.  Also, don't include tasks with
+            a splinterId attribute, since they are not actually "working"
+            persay.
+        taskClass -- Only show this taskClass
         """
         query = { 'state': 'working' }
         if host:
             query['host'] = socket.gethostname()
+            query['splinterId'] = { '$exists': 0 }
         if taskClass:
             query['taskClass'] = taskClass
         return self._database[self.TASK_COLLECTION].find(
@@ -404,14 +408,38 @@ class Connection(object):
             if task is None:
                 # No tasks are waiting to run
                 break
+
+            newUpdated = updates
+            splinterUpdated = None
+            if task.get('batch') or task.get('schedule'):
+                # For batch and scheduled tasks, we'll need to create a task
+                # that we're actually going to run, and point back to that from
+                # the batch / scheduled task.
+                splinterUpdated = updates.copy()
+                splinterUpdated['splinterOf'] = task['_id']
+
+                splinterTask = self._createTask(
+                    now
+                    , task['taskClass']
+                    , splinterUpdated
+                    , task['kwargs']
+                )
+
+                newUpdated = updates.copy()
+                newUpdated['splinterId'] = splinterTask
+                splinterUpdated['_id'] = splinterTask
+
             r = c.update(
                 { '_id': task['_id'], 'state': 'request' }
-                , { '$set': updates }
+                , { '$set': newUpdated }
                 , safe = True
             )
             if r.get('updatedExisting') == True:
                 # Successfully acquired the task
-                task.update(updates)
+                if splinterUpdated is not None:
+                    task.update(splinterUpdated)
+                else:
+                    task.update(newUpdated)
                 break
 
         return task
@@ -447,36 +475,30 @@ class Connection(object):
             data corruption.
         """
         c = self._database[self.TASK_COLLECTION]
-        now = datetime.utcnow()
-        c.update(
-            { 
-                '_id': taskId
-                , 'state': self.states.WORKING
-                , 'tsStart': { '$lte': startedBefore }
-            }
-            , { '$set': { 
-                'state': 'error'
-                , 'lastLog': 'Task died - see log' 
-                , 'tsStop': now
-            } }
-        )
+        taskData = c.find_one({ 
+            '_id': taskId
+            , 'state': { '$nin': self.states.DONE_GROUP }
+            , 'tsStart': { '$lte': startedBefore }
+        })
+        if taskData is not None:
+            self.taskStopped(taskId, taskData, False, 'Task died - see log')
         
-    def taskStopped(self, task, success, lastLog, moveIdCallback):
+    def taskStopped(self, taskId, taskData, success, lastLog):
         """Update the database noting that a task has stopped.  Must be callable
-        multiple times; see Task._finished.
+        multiple times; for instance, if a task thread fails, and then in this
+        method an exception is raised, then the Processor's monitor will call
+        it again.
         
-        task - the Task being stopped
+        taskId - the Task being stopped
+
+        taskData - the data for the task being stopped
         
         success - True for success, False for error.  May also be an instance
             of RetryTaskError for a retry.
         
         lastLog - The last log message.
-
-        moveIdCallback - called when a batch task gets its id moved with the
-            new ID as an argument.  Used to keep logs associated with ids.
         """
         c = self._database[self.TASK_COLLECTION]
-        taskId = task.taskId
 
         now = datetime.utcnow()
         finishUpdates = {
@@ -484,8 +506,11 @@ class Connection(object):
             , 'lastLog': lastLog
         }
         if isinstance(success, RetryTaskError):
+            if taskData.get('splinterOf'):
+                # Just need to reset the splintered task to request... probably
+                raise NotImplementedError()
             try:
-                self._retryTask(task, success.delay)
+                self._retryTask(taskData, success.delay)
                 finishUpdates['state'] = self.states.RETRIED
             except Exception, e:
                 # We still want to mark end state, etc.
@@ -495,92 +520,20 @@ class Connection(object):
         else:
             finishUpdates['state'] = 'success' if success else 'error'
 
-        if \
-            task is not None \
-            and (
-                task.taskData.get('batch') \
-                or task.taskData.get('schedule')
-            ):
-            # We need to change the identifier to make way for a new 
-            # batch or interval task.  This isa destructive and we want it
-            # to succeed always, so we set it up in a try loop to deal with 
-            # StopTaskError
-            taskData = [ None ]
-            reinserted = [ False ]
-            deletedData = [ None ]
-            queueChecked = [ False ]
-            rescheduled = [ False ]
-            def tryFixTask():
-                if taskData[0] is None:
-                    taskData[0] = c.find_one({ '_id': taskId })
-                if not reinserted[0]:
-                    taskData[0]['_id'] = self.getNewId()
-                    taskData[0].update(finishUpdates)
-                    reinsertedOk = c.insert(taskData[0], safe=True)
-                    moveIdCallback(taskData[0]['_id'])
-                    reinserted[0] = reinsertedOk
-                if not deletedData[0]:
-                    # In case anything (specifically batchQueued) changed
-                    # while we were copying the record, we want to atomically
-                    # re-fetch data.
-                    deletedData[0] = c.find_and_modify(
-                        { '_id': taskId }
-                        , remove=True
-                    )
-                    if deletedData[0] is None:
-                        deletedData[0] = taskData[0]
-                if not queueChecked[0] and deletedData[0].get('batchQueued'):
-                    taskArgs = { 
-                        '_id': taskId
-                        , 'batch': True 
-                        , 'tsRequest': deletedData[0]['batchQueued']
-                        , 'priority': deletedData[0].get('priority', 0)
-                    }
-                    # Even if this gets run twice, it's fine since we 
-                    # have a specific ID; only one task will be created.
-                    self._createTask(now, deletedData[0]['taskClass'], taskArgs
-                        , task._kwargsOriginal
-                    )
-                    queueChecked[0] = True
-                if not rescheduled[0] and deletedData[0].get('schedule'):
-                    nextTime = self._scheduleGetNextRunTime(
-                        taskId
-                        , deletedData[0]['tsStart']
-                        , now
-                    )
-                    if nextTime is not None:
-                        taskArgs = {
-                            '_id': taskId
-                            , 'schedule': True
-                            , 'tsRequest': nextTime
-                            , 'priority': deletedData[0].get('priority', 0)
-                        }
-                        # Same as with batchQueued; OK to run twice since we use
-                        # _id.
-                        self._createTask(
-                            now
-                            , deletedData[0]['taskClass']
-                            , taskArgs
-                            , task._kwargsOriginal
-                        )
-                    rescheduled[0] = True
+        if (finishUpdates['state'] != self.states.RETRIED
+                and taskData.get('splinterOf')):
+            # Before we try to update our task, update the task we splintered
+            # from.  If that fails, we'll get called again by a monitor, no big
+            # deal.
+            # But we want to be sure the next iteration of the splintering task
+            # gets set up.
+            self._onSplinterStop(taskData, now)
 
-
-            # A while loop would necessarily leave gaps in the try..except
-            # block.  So for 100% coverage, we do it like this.
-            try:
-                try:
-                    tryFixTask()
-                except:
-                    tryFixTask()
-            except:
-                tryFixTask()
-        else:
-            #Standard set-as-finished update; safe to be called repeatedly.
-            c.update(
-                { '_id': taskId }
-                , { '$set': finishUpdates }
-            )
+        #Standard set-as-finished update; safe to be called repeatedly.
+        c.update(
+            { '_id': taskId, 'state': { '$nin': self.states.DONE_GROUP } }
+            , { '$set': finishUpdates }
+        )
 
     def _createTask(self, utcNow, taskClass, taskArgs, kwargsEncoded):
         """Creates a new task entry with some basic default task args that
@@ -758,7 +711,87 @@ class Connection(object):
             kwargsEncoded[key] = newValue
         return kwargsEncoded
 
-    def _retryTask(self, task, delay):
+    def _onSplinterStop(self, splinterData, now):
+        """When a task with a splinterOf attribute gets stopped, update the
+        splintering task to ensure that subsequent runs are executed.
+
+        This needs to be designed so it can be called more than once.
+        """
+        # We really just need to pull down the splintering task, and execute
+        # the next step there.
+        c = self._database[self.TASK_COLLECTION]
+
+        splinterId = splinterData['_id']
+        taskId = splinterData['splinterOf']
+
+        # Note about these updates - if splinterId isn't our splinter's id,
+        # then this call (_onSplinterStop) previously succeeded, so everything
+        # is working fine.
+        if splinterData.get('batch'):
+            # If it was a batch task, update the splinter like a batch
+            c.update(
+                { 
+                    '_id': taskId
+                    , 'splinterId': splinterId
+                    # We want to match only if batchQueued exists, since 
+                    # we're setting the state back to request.
+                    , 'batchQueued': { '$exists': True }
+                }
+                , {
+                    '$set': {
+                        'state': 'request'
+                    }
+                    , '$unset': {
+                        'splinterId': 1
+                    }
+                    , '$rename': {
+                        # Overwrite tsRequest with batched time
+                        'batchQueued': 'tsRequest'
+                    }
+                }
+            )
+
+        if splinterData.get('schedule'):
+            nextTime = self._scheduleGetNextRunTime(
+                taskId
+                , splinterData['tsStart']
+                , now
+            )
+            if nextTime is not None:
+                c.update(
+                    {
+                        '_id': taskId
+                        , 'splinterId': splinterId
+                    }
+                    , {
+                        '$set': {
+                            'state': 'request'
+                            , 'tsRequest': nextTime
+                        }
+                        , '$unset': {
+                            'splinterId': 1
+                        }
+                    }
+                )
+
+        # Regardless, if we reach here, it shouldn't be in working state
+        c.update(
+            {
+                '_id': taskId
+                , 'splinterId': splinterId
+            }
+            , {
+                '$set': {
+                    'state': 'success'
+                    , 'lastLog': 'See splinter task ' + splinterId
+                }
+                , '$unset': {
+                    'splinterId': 1
+                }
+            }
+        )
+
+    def _retryTask(self, taskData, delay):
         """Queue up an identical version of task after delay time.
         """
         now = datetime.utcnow()
@@ -766,12 +799,15 @@ class Connection(object):
 
         taskArgs = {
           'tsRequest': runAt
-          , 'retry': task.taskData.get('retry', 0) + 1
-          , 'priority': task.taskData.get('priority', 0)
+          , 'retry': taskData.get('retry', 0) + 1
+          , 'priority': taskData.get('priority', 0)
         }
-        taskClass = task.taskData['taskClass']
-        kwargs = task._kwargsOriginal
-        self._createTask(now, taskClass, taskArgs, kwargs)
+        self._createTask(
+            now
+            , taskData['taskClass']
+            , taskArgs
+            , taskData['kwargs']
+        )
 
     def _scheduleGetNextRunTime(self, scheduleId, taskStart, taskStop):
         """Given the provided scheduler identifier, task working start time,

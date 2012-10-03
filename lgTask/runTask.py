@@ -100,8 +100,6 @@ def _runTask(
             log("Unhandled exception: " + traceback.format_exc())
             success = False
         finally:
-            def moveLogFile(newId):
-                os.rename(logFile, getLogForId(newId))
-            conn.taskStopped(task, success, lastLogMessage[0], moveLogFile)
+            conn.taskStopped(taskId, taskData, success, lastLogMessage[0])
 
 

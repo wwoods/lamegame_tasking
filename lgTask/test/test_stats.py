@@ -85,15 +85,20 @@ class TestStats(TestCase):
 
     def test_noDataForAwhile(self):
         # This timestamp always has the same base value
-        self.now = datetime.datetime(2012, 10, 2, 7, 31, 46, 21662)
+        self.now = datetime.datetime.utcfromtimestamp(
+            self.stats._getBlocks(self.stats._getTimeVal(None), [(6*60*60,100)]
+                )[0][3] + 30)
         firstVal = 43
 
         old = self.now - datetime.timedelta(seconds = 50*60)
+        ancient = old - datetime.timedelta(seconds = 180)
         self.stats._tryNewStat(self.stats._getSchemaFor('test'), 'test',
-                self.stats._getTimeVal(old), randomize = True)
+                self.stats._getTimeVal(ancient), randomize = True)
         # Since the collection is marked as having latest data from old, if
         # we get stats from then on, we should get a bunch of zeroes.
+        self.stats.addStat('test', firstVal, time = old)
         r = self.stats.getStat('test', start = old, stop = self.now)
+        print("interval: " + str(r['tsInterval']))
         for v in r['values'][1:]:
             self.assertEqual(0, v)
         self.assertEqual(firstVal, r['values'][0])
