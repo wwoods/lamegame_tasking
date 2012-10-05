@@ -113,3 +113,28 @@ class TestStats(TestCase):
         self.assertEqual(1000, r['values'][-1])
 
 
+    def test_reset(self):
+        # See if writing data to two points wildly apart still works
+        epoch = datetime.datetime.utcfromtimestamp(0)
+        self.stats.addStat('test', 100, time = epoch)
+        self.stats.addStat('test', 200, time = self.now)
+        r = self.stats.getStat('test', self.now, self.now)
+        self.assertEqual(200, r['values'][0])
+
+
+    def test_wrongSchema(self):
+        # Since the stats interface caches schemas for docs, we want to be
+        # sure that we don't update a stat based on the wrong schema.
+        self.stats.addStat('test', 100, time = self.now)
+        self.stats.addStat('test', 100, time = self.now)
+        self.stats._col.update(
+            { '_id': 'test' }
+            , { '$set': { 'schema.version': 2, 'schema.type': 'set' }}
+        )
+        self.stats.addStat('test', 100, time = self.now)
+        # This operation should perform a 'set' now, even though 'add' is 
+        # what is cached
+        r = self.stats.getStat('test', self.now, self.now)
+        self.assertEqual(100, r['values'][0])
+
+

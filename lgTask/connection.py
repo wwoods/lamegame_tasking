@@ -47,7 +47,9 @@ def _encodePyMongo(value):
 class Connection(object):
     """Connects to a task database and performs operations with that database.
 
-    Thread-safe.
+    Thread-safe.  Note, however, that the underlying mongodb connection object
+    has auto_start_request set to False, meaning you might have to use code
+    blocks with start_request if you (ab)use the database object directly.
     """
     
     STAT_COLLECTION = "lgTaskStat"
@@ -179,7 +181,7 @@ class Connection(object):
                     , 'tsRequest': runAt
                     , 'priority': priority
                 }}
-                , { '_id': 1 }
+                , fields = { '_id': 1 }
             )
 
             if r is None:
@@ -471,7 +473,7 @@ class Connection(object):
                  , timeout = 10.0
         )[0]
 
-    def taskDied(self, taskId, startedBefore):
+    def taskDied(self, taskId, startedBefore, diedReason):
         """Called when a task's process is detected as dead.  Updates the 
         database unless the status is success or error.
 
@@ -482,6 +484,8 @@ class Connection(object):
             database and potentially restarted before this function is called,
             we need to use a known upper bound on start time to prevent
             data corruption.
+        diedReason - Short description of why it's being marked dead.  Should
+            not have a period at the end.
         """
         c = self._database[self.TASK_COLLECTION]
         taskData = c.find_one({ 
@@ -490,7 +494,8 @@ class Connection(object):
             , 'tsStart': { '$lte': startedBefore }
         })
         if taskData is not None:
-            self.taskStopped(taskId, taskData, False, 'Task died - see log')
+            msg = 'Task died - see log: ' + diedReason
+            self.taskStopped(taskId, taskData, False, msg)
         
     def taskStopped(self, taskId, taskData, success, lastLog):
         """Update the database noting that a task has stopped.  Must be callable
@@ -515,11 +520,13 @@ class Connection(object):
             , 'lastLog': lastLog
         }
         if isinstance(success, RetryTaskError):
-            if taskData.get('splinterOf'):
-                # Just need to reset the splintered task to request... probably
-                raise NotImplementedError()
             try:
-                self._retryTask(taskData, success.delay)
+                if taskData.get('splinterOf'):
+                    # Just need to reset the splintered task to request... 
+                    # probably
+                    self._onSplinterRetry(taskData, now, success.delay)
+                else:
+                    self._retryTask(taskData, success.delay)
                 finishUpdates['state'] = self.states.RETRIED
             except Exception, e:
                 # We still want to mark end state, etc.
@@ -595,7 +602,9 @@ class Connection(object):
                     "pymongo://[user:password@]host[:port]/db"))
         user, password, host, port, db, coll = m.groups()
         
-        c = pymongo.Connection(host=host, port=port, max_pool_size = 100)
+        c = pymongo.Connection(host=host, port=port
+            , auto_start_request = False
+        )
         if db is not None:
             db = db[1:] # Trim off leading slash
             c = c[db]
@@ -760,6 +769,27 @@ class Connection(object):
             kwargsEncoded[key] = newValue
         return kwargsEncoded
 
+    def _onSplinterRetry(self, splinterData, now, delay):
+        """Retry a task that was a splinter after the given delay.
+        """
+        runAt = self._getRunAtTime(now, delay)
+        splinterId = splinterData['_id']
+        taskId = splinterData['splinterOf']
+        c = self._database[self.TASK_COLLECTION]
+        c.update(
+            { '_id': taskId, 'splinterId': splinterId }
+            , {
+                '$set': { 
+                    'state': 'request'
+                    , 'tsRequest': runAt
+                    , 'lastLog': 'Scheduled for retry from ' + splinterId
+                }
+                , '$unset': {
+                    'splinterId': 1
+                }
+            }
+        )
+
     def _onSplinterStop(self, splinterData, now):
         """When a task with a splinterOf attribute gets stopped, update the
         splintering task to ensure that subsequent runs are executed.
@@ -773,72 +803,75 @@ class Connection(object):
         splinterId = splinterData['_id']
         taskId = splinterData['splinterOf']
 
-        # Note about these updates - if splinterId isn't our splinter's id,
-        # then this call (_onSplinterStop) previously succeeded, so everything
-        # is working fine.
-        if splinterData.get('batch'):
-            # If it was a batch task, update the splinter like a batch
-            c.update(
-                { 
-                    '_id': taskId
-                    , 'splinterId': splinterId
-                    # We want to match only if batchQueued exists, since 
-                    # we're setting the state back to request.
-                    , 'batchQueued': { '$exists': True }
-                }
-                , {
-                    '$set': {
-                        'state': 'request'
-                    }
-                    , '$unset': {
-                        'splinterId': 1
-                    }
-                    , '$rename': {
-                        # Overwrite tsRequest with batched time
-                        'batchQueued': 'tsRequest'
-                    }
-                }
-            )
-
-        if splinterData.get('schedule'):
-            nextTime = self._scheduleGetNextRunTime(
-                taskId
-                , splinterData['tsStart']
-                , now
-            )
-            if nextTime is not None:
+        # We're going to do some sequential updates without checking if they
+        # succeed, so we need a request here.
+        with c.database.connection.start_request():
+            # Note about these updates - if splinterId isn't our splinter's id,
+            # then this call (_onSplinterStop) previously succeeded, so 
+            # everything is working fine.
+            if splinterData.get('batch'):
+                # If it was a batch task, update the splinter like a batch
                 c.update(
-                    {
+                    { 
                         '_id': taskId
                         , 'splinterId': splinterId
+                        # We want to match only if batchQueued exists, since 
+                        # we're setting the state back to request.
+                        , 'batchQueued': { '$exists': True }
                     }
                     , {
                         '$set': {
                             'state': 'request'
-                            , 'tsRequest': nextTime
                         }
                         , '$unset': {
                             'splinterId': 1
                         }
+                        , '$rename': {
+                            # Overwrite tsRequest with batched time
+                            'batchQueued': 'tsRequest'
+                        }
                     }
                 )
 
-        # Regardless, if we reach here, it shouldn't be in working state
-        c.update(
-            {
-                '_id': taskId
-                , 'splinterId': splinterId
-            }
-            , {
-                '$set': {
-                    'state': 'success'
-                    , 'lastLog': 'See splinter task ' + splinterId
+            if splinterData.get('schedule'):
+                nextTime = self._scheduleGetNextRunTime(
+                    taskId
+                    , splinterData['tsStart']
+                    , now
+                )
+                if nextTime is not None:
+                    c.update(
+                        {
+                            '_id': taskId
+                            , 'splinterId': splinterId
+                        }
+                        , {
+                            '$set': {
+                                'state': 'request'
+                                , 'tsRequest': nextTime
+                            }
+                            , '$unset': {
+                                'splinterId': 1
+                            }
+                        }
+                    )
+
+            # Regardless, if we reach here, it shouldn't be in working state
+            c.update(
+                {
+                    '_id': taskId
+                    , 'splinterId': splinterId
                 }
-                , '$unset': {
-                    'splinterId': 1
+                , {
+                    '$set': {
+                        'state': 'success'
+                        , 'lastLog': 'See splinter task ' + splinterId
+                    }
+                    , '$unset': {
+                        'splinterId': 1
+                    }
                 }
-            }
-        )
+            )
 
     def _retryTask(self, taskData, delay):
         """Queue up an identical version of task after delay time.

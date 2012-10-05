@@ -25,15 +25,19 @@ class TaskView(Control):
                 , sort = self.sort
                 , limit = self.limit
         )
-        cells = [ ('_id', 'Task ID'), ('taskClass', 'Task Class')
+        cells = [ ('taskClass', 'Task Class')
                  , ('kwargs', 'Task Kwargs') 
                  , ('state', 'State')
                  , ('tsStart', 'Started')
                  , ('tsStop', 'Stopped'), ('lastLog', 'Last Log') ]
-        table = Table(len(cells))
+        table = Table(len(cells) + 1)
+        table.add_cell(TextControl(text = 'Task ID'))
         for c in cells:
             table.add_cell(TextControl(text = c[1]))
         for t in tasks:
+            i = t['_id']
+            table.add_cell(LiteralControl(
+                    html = '<a href="taskLog?id={0}">{0}</a>'.format(i)))
             for c in cells:
                 table.add_cell(TextControl(text = str(t.get(c[0], ''))))
             
@@ -101,4 +105,23 @@ class LgTaskRoot(object):
             , limit = 10
         ))
         return body.gethtml()
+
+
+    @cherrypy.expose
+    def taskLog(self, id):
+        """Return the log for task with ID.
+        """
+        blocks = []
+        while True:
+            block = self._conn.talkGetTaskLog(id, len(blocks))
+            blocks.append(block)
+            if len(block) == 0:
+                break
+
+        page = LgTaskPage()
+        page.append(LiteralControl(
+            html='<h1>Task {0}</h1><pre style="white-space:pre-wrap;">{1}</pre>'
+                .format(
+                    id, ''.join(blocks))))
+        return page.gethtml()
     

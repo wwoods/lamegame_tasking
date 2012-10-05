@@ -457,7 +457,9 @@ class Processor(object):
                 open(self._getLogFile(taskId), 'a').write(
                     'Error on launch: ' + traceback.format_exc()
                 )
-                self.taskConnection.taskDied(taskId, latestStartTime)
+                self.taskConnection.taskDied(taskId, latestStartTime
+                    , 'Error on launch'
+                )
                 raise
 
     def _getLogFile(self, tid):
@@ -538,7 +540,7 @@ class Processor(object):
                 continue
             if not os.path.exists(self._getPidFile(tid)):
                 # No pid file, mark failed
-                self.taskConnection.taskDied(tid, td['tsStart'])
+                self.taskConnection.taskDied(tid, td['tsStart'], 'No pid file')
 
         return now
 
@@ -626,7 +628,9 @@ class Processor(object):
                     pidFile = self._getPidFile(tid)
                     if os.path.exists(pidFile):
                         # Illegal task exit, mark dead
-                        self.taskConnection.taskDied(tid, latestStart)
+                        self.taskConnection.taskDied(tid, latestStart
+                            , 'Illegal task exit'
+                        )
                         os.remove(pidFile)
                 except Exception, e:
                     self.log(
@@ -848,17 +852,8 @@ class _ProcessorSlave(multiprocessing.Process):
                 , self._processorHome
                 , setProcTitle = False
             )
-        finally:
-            # This task's "pid" is no longer running, so mark the pid file as
-            # done so that the executor might exit
-            pidFile = self._processor._getPidFile(taskData['_id'])
-            try:
-                os.remove(pidFile)
-            except OSError:
-                # File didn't exist, oh well, we were just going to remove it.
-                # Even if it's another error (exists but not deleted), this
-                # isn't fatal, as when the pid dies the monitor will stop.
-                pass
+        except Exception:
+            self._processor.error('In or after _runTask')
 
 
     def _shouldContinue(self):

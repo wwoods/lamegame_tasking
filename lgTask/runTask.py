@@ -101,5 +101,8 @@ def _runTask(
             success = False
         finally:
             conn.taskStopped(taskId, taskData, success, lastLogMessage[0])
+            # If taskStopped ran successfully, then we have finished execution
+            # properly and should remove our pid file
+            os.remove(pidFileName)
 
 

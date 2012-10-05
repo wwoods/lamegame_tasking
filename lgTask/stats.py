@@ -1,6 +1,8 @@
 
 import datetime
 import pymongo
+import threading
+import time
 
 class StatsInterface(object):
     """Stats interface, for storing statistics in a round-robin type of 
@@ -28,25 +30,33 @@ class StatsInterface(object):
             get two values for the same block, the most recent value will be
             used.
     """
+
+    SCHEMA_UPDATE_INTERVAL = 60 # seconds
+
     def __init__(self, statsCollection):
         self._epoch = datetime.datetime.utcfromtimestamp(0)
         self._col = statsCollection
-        self._schema = self._col.find_one({ '_id': '_schema' })
-        if self._schema is None:
-            self._schema = { '_id': '_schema'
-                    , 'prefixes': [ # Sorted in length-desc order
-                        {
-                            'prefix': ''
-                            , 'intervals': [ 
-                                [3*60, 1] # 3 min @ 1 day
-                                , [5, 15] # 15 min @ 15 days
-                                , [24, 365] # 6 hr @ 1 yr
-                            ]
-                            , 'sampleSuffix': '-sample'
-                        }
+        self._lock = threading.Lock()
+        self._schemas = {}
+        self._schemas_doc = """Dict of { stat: { schema: ..., updated: ... }}.
+                Maintained by _getSchemaFor"""
+        # for uninitialized databases using stats for the first time,
+        # _schemaDefault provides the default starting schema.
+        self._schemaNew = {
+            '_id': '_schema'
+            , 'prefixes': [ # Sorted in length-desc order
+                {
+                    'prefix': ''
+                    , 'intervals': [ 
+                        [3*60, 1] # 3 min @ 1 day
+                        , [5, 15] # 15 min @ 15 days
+                        , [24, 365] # 6 hr @ 1 yr
                     ]
+                    , 'sampleSuffix': '-sample'
                 }
-            self._col.save(self._schema)
+            ]
+        }
+        self._schemaNewUpdated = 0.0
 
 
     def addStat(self, path, value, time = None):
@@ -64,9 +74,12 @@ class StatsInterface(object):
             path = '.'.join([ str(n).replace('.', '-') for n in path ])
 
         schema = self._getSchemaFor(path)
-        myType = 'add'
-        if path.endswith(schema['sampleSuffix']):
-            myType = 'set'
+        myType = schema.get('type', 'add')
+
+        # New stat?
+        if schema['version'] == 0:
+            self._tryNewStat(schema, path, timeVal)
+            return self.addStat(path, value, time = time)
 
         # index of each block we're writing to in each interval
         blocks = self._getBlocks(timeVal, schema['intervals'])
@@ -98,8 +111,10 @@ class StatsInterface(object):
 
             fields[block] = { '$slice': [ blockInfo[0], 1 ] }
 
+        schemaVer = schema['version']
         r = self._col.find_and_modify(
-            { '_id': path, 'tsLatest': { '$lte': timeVal }}
+            { '_id': path, 'tsLatest': { '$lte': timeVal }
+                , 'schema.version': schemaVer }
             , updates
             , fields = fields
         )
@@ -110,7 +125,11 @@ class StatsInterface(object):
             if oldLatest + (oldBlocks[0][1] - 1) * oldBlocks[0][2] < timeVal:
                 # They need a reset; the oldest data is older than all of the
                 # current blocks could be.
-                raise NotImplementedError()
+                self._col.remove({ '_id': path })
+                newSchema = schema.copy()
+                newSchema['version'] = 0
+                self._tryNewStat(newSchema, path, timeVal)
+                return self.addStat(path, value, time = time)
             elif oldBlocks[0][0] != blocks[0][0]:
                 # They need an update... something to keep in mind: since we've
                 # replaced tsLatest with our tsLatest, no-one else should be
@@ -148,7 +167,7 @@ class StatsInterface(object):
                         # Remove the old counter amount for this block
                         incs[key] = -r['block'][slayer][0]
                 self._col.update(
-                    { '_id': path }
+                    { '_id': path, 'schema.version': schemaVer }
                     , updates
                 )
                         
@@ -157,20 +176,18 @@ class StatsInterface(object):
         else:
             # Can we update a document updated after us?
             r = self._col.find_and_modify(
-                { '_id': path, 'tsLatest': { '$gte': timeVal }}
+                { '_id': path, 'tsLatest': { '$gte': timeVal }
+                        , 'schema.version': schemaVer }
                 , updates
                 , fields = fields
             )
             if r is None:
-                # r is None, meaning this stat doesn't exist.  Create a new
-                # stat and insert it
-                if not self._tryNewStat(schema, path, timeVal):
-                    # Insert failed, meaning someone else beat us.  Run
-                    # a normal update
-                    return self.addStat(path, value, time = time)
-                else:
-                    # Still run a normal update to add our stat
-                    return self.addStat(path, value, time = time)
+                # r is None, meaning this stat doesn't exist.  Which is pretty
+                # weird considering we test for it when we're setting up the
+                # schema.  Wipe our schema cache and try again
+                with self._lock:
+                    self._schemas.pop(path, None)
+                return self.addStat(path, value, time = time)
             # if r is not None, then we're ok.  The document's already been
             # updated after us, meaning that the bucket logic has already
             # been applied.  So no worries
@@ -304,10 +321,54 @@ class StatsInterface(object):
 
 
     def _getSchemaFor(self, statName):
-        for p in self._schema['prefixes']:
-            if statName.startswith(p['prefix']):
-                return p
-        return None
+        ts = time.time()
+        with self._lock:
+            if ts - self._schemaNewUpdated > self.SCHEMA_UPDATE_INTERVAL:
+                self._schemaNewUpdated = ts
+                d = self._col.find_one('_schema')
+                if d is not None:
+                    self._schemaNew = d
+                else:
+                    self._col.insert(self._schemaNew)
+
+        with self._lock:
+            statSchema = self._schemas.get(statName)
+        if (
+                statSchema is None 
+                or ts - statSchema['updated'] > self.SCHEMA_UPDATE_INTERVAL
+            ):
+            # Out of date, get new info
+            statSchema = None
+            d = self._col.find_one(statName, [ 'schema' ])
+            with self._lock:
+                if d is not None:
+                    statSchema = self._schemas[statName] = dict(
+                        schema = d['schema']
+                        , updated = ts
+                    )
+                else:
+                    # Stat deleted?
+                    self._schemas.pop(statName, None)
+
+        if statSchema is None:
+            # We don't have a schema either because it was deleted at the db
+            # or the stat just plain doesn't exist.
+            # Find the best match in our _schemaNew and return that, WITHOUT
+            # setting it on self._schemas.  self._schemas should only be
+            # written after a successful insert operation or re-cache
+            for p in self._schemaNew['prefixes']:
+                if statName.startswith(p['prefix']):
+                    # Convert to personalized schema for this stat; set version
+                    # to zero as a marker that this should NOT be used as an
+                    # update, but only as a create.
+                    schema = dict(intervals = p['intervals'], version = 0)
+                    if statName.endswith(p['sampleSuffix']):
+                        schema['type'] = 'set'
+                    statSchema = dict(schema = schema)
+                    break
+            if statSchema is None:
+                raise ValueError("_schema is not properly configured")
+        return statSchema['schema']
 
 
     def _getTimeVal(self, time):
@@ -329,9 +390,17 @@ class StatsInterface(object):
 
         Return True if new stat made ok, False if it already was made.
 
+        schema -- Schema with version == 0, for new stats.
+        path -- Name of new stat
+        timeVal -- The time to initialize tsLatest to; used to get addStat()
+                to not zero unnecessary buckets.
         randomize -- For debugging.  Instead of filling with zeroes, fill with
                 random data from 10 to 100.
         """
+        if schema['version'] != 0:
+            raise ValueError("Bad schema specified: " + str(schema))
+        schema['version'] = 1
+
         blocks = {}
         blockData = self._getBlocks(timeVal, schema['intervals'])
         for layer, data in enumerate(blockData):
@@ -345,10 +414,22 @@ class StatsInterface(object):
             '_id': path
             , 'tsLatest': timeVal
             , 'block': blocks
+            , 'schema': schema
         }
         try:
             self._col.insert(newDoc, safe = True)
+            with self._lock:
+                self._schemas[path] = { 
+                    'schema': schema
+                    , 'updated': time.time()
+                }
         except pymongo.errors.DuplicateKeyError:
+            # A tiny bit of legacy cleanup code here - if they don't have a
+            # schema, assume it should be this one.
+            self._col.update(
+                { '_id': path, 'schema': { '$exists': 0 } }
+                , { '$set': { 'schema': schema } }
+            )
             return False
         return True
 
