@@ -15,8 +15,10 @@ def doTest():
     col = c._database['test']
     col.insert({ 'id': 'a', 'value': 0 })
 
+    a = time.time()
     for i in range(10000):
         c.createTask("AddTask", value = i)
+    initTime = time.time() - a
 
     a = time.time()
     runProcessor(5.0)
@@ -25,6 +27,7 @@ def doTest():
         print("FAIL")
     b = time.time()
     print("Time: {0}".format(b - a))
+    print("Init time: {0}".format(initTime))
 
 if __name__ == '__main__':
     doTest()

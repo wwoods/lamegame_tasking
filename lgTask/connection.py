@@ -6,6 +6,8 @@ import pymongo
 import re
 import socket
 import subprocess
+import threading
+import time
 import uuid
 
 from lgTask.errors import *
@@ -44,6 +46,8 @@ def _encodePyMongo(value):
 
 class Connection(object):
     """Connects to a task database and performs operations with that database.
+
+    Thread-safe.
     """
     
     STAT_COLLECTION = "lgTaskStat"
@@ -94,6 +98,14 @@ class Connection(object):
             self._initPyMongo(connString)
         else:
             raise ValueError("Unrecognized connString: {0}".format(connString))
+
+        self._lock = threading.Lock()
+        self._lock_doc = """Locking mechanism for cached data"""
+
+        # Keeping track of the # of tasks in the table for statistical tracking
+        # of collision likeliness.
+        self._taskCount = 0
+        self._taskCountLast = 0.0
 
 
     def batchTask(self, runAt, taskClass, priority=0, **kwargs):
@@ -245,9 +257,6 @@ class Connection(object):
         }
         kwargs = self._kwargsEncode(kwargs)
         return self._createTask(now, taskClass, taskArgs, kwargs)
-
-    def getNewId(self):
-        return uuid.uuid4().hex
 
     def getTalk(self, **kwargs):
         """Returns an lgTask.talk.TalkConnection object with the same 
@@ -552,11 +561,23 @@ class Connection(object):
 
         taskDefaultArgs.update(taskArgs)
 
-        if '_id' not in taskDefaultArgs:
-            taskDefaultArgs['_id'] = self.getNewId()
-
         taskColl = self._database[self.TASK_COLLECTION]
-        taskColl.insert(taskDefaultArgs)
+        if '_id' not in taskDefaultArgs:
+            while True:
+                try:
+                    taskDefaultArgs['_id'] = self._getNewId()
+                    taskColl.insert(taskDefaultArgs, safe = True)
+                    break
+                except pymongo.errors.DuplicateKeyError:
+                    # Same _id, pretty unlikely, but possible
+                    continue
+        else:
+            taskColl.insert(taskDefaultArgs, safe = True)
+
+        # If we get here, new task inserted OK
+        with self._lock:
+            self._taskCount += 1
+
         return taskDefaultArgs['_id']
                 
     @classmethod
@@ -623,6 +644,34 @@ class Connection(object):
 
         for index in desired:
             col.ensure_index(list(index))
+
+    def _getNewId(self):
+        """Generate a new potential ID for a task.  Generates one such that
+        the likelihood of collision with an existing task is less than one
+        percent.
+        """
+        self._updateTaskCount()
+        minChars = 2
+        goodFor = 16 * 16.0
+        while self._taskCount / goodFor >= 0.01:
+            minChars += 1
+            goodFor *= 16
+
+        u = hashlib.sha1(uuid.uuid4().hex).hexdigest()
+        return u[:minChars]
+        # OLD code to actually get shortest possible... stochastic is a lot
+        # faster though.
+        ids = [ u[:i] for i in xrange(minChars, len(u)) ]
+        # This IS an extra query just to keep the IDs nice, but oh well.
+        existing = self._database[self.TASK_COLLECTION].find(
+            { '_id': { '$in': ids } }
+            , fields = []
+        )
+        existingIds = [ d['_id'] for d in existing ]
+        for i in ids:
+            if i not in existingIds:
+                return i
+        raise ValueError("Duplicate UUID?  UNLIKELY")
 
     def _getRunAtTime(self, utcNow, runAt):
         """Changes a runAt variable that might be an interval or datetime,
@@ -862,5 +911,22 @@ class Connection(object):
             , 'priority': schedule.get('priority', 0)
         }
         self._createTask(now, taskClass, taskArgs, kwargs)
+
+    def _updateTaskCount(self):
+        """Update self._taskCount if it is old.
+        """
+        now = time.time()
+        updateInterval = 60.0
+        doUpdate = False
+        if now - self._taskCountLast > updateInterval:
+            # Ensure we should update
+            with self._lock:
+                if now - self._taskCountLast > updateInterval:
+                    doUpdate = True
+                    self._taskCountLast = now
+
+        if doUpdate:
+            taskColl = self._database[self.TASK_COLLECTION]
+            self._taskCount = taskColl.count()
 
 
