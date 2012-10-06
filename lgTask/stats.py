@@ -341,7 +341,7 @@ class StatsInterface(object):
             statSchema = None
             d = self._col.find_one(statName, [ 'schema' ])
             with self._lock:
-                if d is not None:
+                if d is not None and 'schema' in d:
                     statSchema = self._schemas[statName] = dict(
                         schema = d['schema']
                         , updated = ts
