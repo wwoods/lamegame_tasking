@@ -224,7 +224,13 @@ class Connection(object):
                 , 'batch': True
                 , 'priority': priority
             }
-            return self._createTask(now, taskClass, taskArgs, kwargs)
+            try:
+                return self._createTask(now, taskClass, taskArgs, kwargs)
+            except pymongo.errors.DuplicateKeyError:
+                # Failed to insert, someone else batched it first!
+                return self.batchTask(runAt, taskClass, priority = priority
+                        , **originalKwargs
+                )
         else:
             return existing['_id']
 
