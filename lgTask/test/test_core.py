@@ -166,6 +166,34 @@ class TestCore(TestCase):
         newTask = taskDb.find_one({ '_id': 'IncValueTask-k' })
         self.assertEqual('request', newTask['state'])
 
+    def test_processorCleanup(self):
+        # Ensure that a processor will clean up old logs properly
+        c = self.conn._database[self.conn.TASK_COLLECTION]
+        c.insert({ '_id': 'fakeExists', 'state': 'success' })
+        c.insert({ '_id': 'fakeWorking', 'state': 'working' })
+        p = lgTask.Processor()
+        p.KEEP_LOGS_FOR = 0.25
+        try:
+            shutil.rmtree("logsCleanup")
+        except OSError:
+            pass
+        os.mkdir("logsCleanup")
+        p._LOG_DIR = "logsCleanup/"
+
+        open('logsCleanup/fakeNoTask.log', 'w').close()
+        open('logsCleanup/fakeExists.log', 'w').close()
+        open('logsCleanup/fakeWorking.log', 'w').close()
+        time.sleep(0.3)
+        open('logsCleanup/fakeNew.log', 'w').close()
+        p._cleanupThreadTarget()
+        filesLeft = os.listdir('logsCleanup')
+        filesLeft.sort()
+        self.assertEqual(
+            [ 'fakeNew.log', 'fakeWorking.log' ]
+            , filesLeft
+        )
+        shutil.rmtree('logsCleanup')
+
     def test_consumeError(self):
         # Test that an error in processor consume does not block the processor.
         # This is a regression test

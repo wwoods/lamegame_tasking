@@ -130,6 +130,16 @@ class Processor(object):
     LOAD_SLEEP_SCALE_NO_TASK = 4.0
     LOAD_SLEEP_SCALE_NO_TASK_doc = """LOAD_SLEEP_SCALE for when we tried to
             get a task but none were waiting"""
+
+    CLEANUP_INTERVAL = 3600
+    CLEANUP_INTERVAL_doc = """Seconds between cleaning up logs"""
+
+    KEEP_LOGS_FOR = 30*24*60*60
+    KEEP_LOGS_FOR_doc = """Seconds to keep logs around for"""
+
+    _LOG_DIR = "logs/"
+    _LOG_DIR_doc = """Directory used for logs; only for testing.  Must end
+            in slash."""
     
     def __init__(self, home='.'):
         """Creates a new task processor operating out of the current working
@@ -153,6 +163,9 @@ class Processor(object):
         
         self._tasksAvailable = self._getTasksAvailable(self._home)
         self._monitors = {}
+
+        self._cleanupThread = None
+        self._cleanupThread_doc = """Thread that cleans up the _LOG_DIR"""
 
         self._startTaskQueue = Queue()
         self._stopOnNoTasks = False
@@ -216,7 +229,7 @@ class Processor(object):
     def log(self, message):
         now = datetime.datetime.utcnow().isoformat()
         print(message)
-        open(self.getPath('logs/' + self.LOGFILE), 'a').write(
+        open(self.getPath(self._LOG_DIR + self.LOGFILE), 'a').write(
             "[{0}] {1}\n".format(now, message)
         )
         
@@ -293,10 +306,12 @@ class Processor(object):
             lastMonitor = 0.0
             lastStats = 0.0
             loadMult = self.LOAD_SLEEP_SCALE
+            lastCleanup = 0.0
             while True:
                 lastScheduler = self._schedulerAudit(lastScheduler)
                 lastMonitor = self._monitorAudit(lastMonitor)
                 lastStats = self._statsAudit(lastStats)
+                lastCleanup = self._cleanupAudit(lastCleanup)
                 try:
                     load = os.getloadavg()[0] / multiprocessing.cpu_count()
                     loadSleep = min(10.0, loadMult * load)
@@ -371,6 +386,57 @@ class Processor(object):
         self._thread.join(timeout)
         if self._thread.is_alive():
             self._thread.raiseException(_ProcessorStop)
+
+
+    def _cleanupAudit(self, lastCleanup):
+        """Schedules a cleanup of the logs directory, returns new scheduled
+        time.
+        """
+        if self._cleanupThread is not None and self._cleanupThread.isAlive():
+            return lastCleanup
+
+        now = time.time()
+        if now - lastCleanup > self.CLEANUP_INTERVAL:
+            self._cleanupThread = threading.Thread(
+                target = self._cleanupThreadTarget
+            );
+            self._cleanupThread.daemon = True
+            self._cleanupThread.start()
+            return now
+        return lastCleanup
+
+
+    def _cleanupThreadTarget(self):
+        """Clean up our logs folder, deleting things older than X.
+        """
+        now = time.time()
+        cutoff = now - self.KEEP_LOGS_FOR
+        c = self.taskConnection
+        log = None
+        try:
+            for log in os.listdir(self.getPath(self._LOG_DIR)):
+                if log == 'processor.log':
+                    # Never remove ourselves
+                    continue
+                logFile = self.getPath(self._LOG_DIR + log)
+                mtime = os.path.getmtime(logFile)
+                if mtime < cutoff:
+                    # taskId is just log name without ".log"
+                    taskId = log[:-4]
+                    task = c.getTask(taskId)
+                    if (task is not None 
+                            and task['state'] not in c.states.DONE_GROUP):
+                        # Task still running, don't clean
+                        continue
+
+                    # Clean up the task entry if it exists
+                    if task is not None:
+                        c._cleanupTask(taskId)
+                    # And delete the file
+                    os.remove(logFile)
+        except:
+            self.error("While cleaning up {0}".format(log))
+
 
     def _consume(self):
         """Grab and consume a task if one is available.  All exceptions should
@@ -463,7 +529,7 @@ class Processor(object):
                 raise
 
     def _getLogFile(self, tid):
-        return self.getPath('logs/' + str(tid) + '.log')
+        return self.getPath(self._LOG_DIR + str(tid) + '.log')
 
     def _getPidFile(self, tid):
         return self.getPath('pids/' + str(tid) + '.pid')

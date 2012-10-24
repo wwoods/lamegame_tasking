@@ -557,6 +557,13 @@ class Connection(object):
             , { '$set': finishUpdates }
         )
 
+    def _cleanupTask(self, taskId):
+        """Remove the db record for the given taskId.  Must already be 
+        finished.
+        """
+        c = self._database[self.TASK_COLLECTION]
+        c.remove({ '_id': taskId, 'state': { '$in': self.states.DONE_GROUP } })
+
     def _createTask(self, utcNow, taskClass, taskArgs, kwargsEncoded):
         """Creates a new task entry with some basic default task args that
         are updated with taskArgs, and kwargs.
