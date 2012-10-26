@@ -137,19 +137,19 @@ class Connection(object):
 
         existing = taskColl.find_one(
             { '_id': taskName }
-            , { 
+            , {
               'batchQueued': 1
               , 'kwargs': 1
               , 'state': 1
-              , 'tsRequest': 1 
+              , 'tsRequest': 1
               , 'priority': 1
             }
         )
 
         if existing:
             # Double check kwarg match or we have another problem
-            if kwargs != existing.get('kwargs') \
-                or priority < existing.get('priority', 0):
+            if (kwargs != existing.get('kwargs')
+                or priority < existing.get('priority', 0)):
                 raise TaskKwargError("Didn't match existing scheduled "
                     + "batch - {0} -- {1}".format(taskName, existing))
 
