@@ -1,9 +1,10 @@
 
 import datetime
+import signal
 import time
 import traceback
 import os
-from lgTask.errors import RetryTaskError
+from lgTask.errors import KillTaskError, RetryTaskError
 
 try:
     # Use setproctitle if available to give us a task ID
@@ -25,7 +26,7 @@ def _runTask(
     , taskData
     , taskConnection
     , processorHome
-    , setProcTitle = True
+    , isThread = False
     ):
     def getLogForId(id):
         return processorHome + '/logs/' + str(id) + '.log'
@@ -46,19 +47,30 @@ def _runTask(
         with open(logFile, 'a') as f:
             f.write(showAs + '\n')
 
+    # If anything goes wrong, default state is error
+    success = False
     try:
+        if not isThread:
+            # If we're not a thread, then we should change the process
+            # title to make ourselves identifiable, and also register
+            # a signal handler to convert SIGTERM into KillTaskError.
+            def onSigTerm(signum, frame):
+                raise KillTaskError()
+            signal.signal(signal.SIGTERM, onSigTerm)
+
         conn = taskConnection
         task = taskClass(conn, taskId, taskData)
+        if not isThread:
+            setProcessTitle(task, processorHome)
 
         # Convert kwargs
         kwargsOriginal = taskData['kwargs']
         task._kwargsOriginal = kwargsOriginal
         kwargs = conn._kwargsDecode(kwargsOriginal)
         task.kwargs = kwargs
-    except Exception, e:
+    except:
         log("Exception during init: " + traceback.format_exc())
     else:
-        success = True
         try:
             task.log = log
             # We tell the task where its log file is only so that fetchLogTask
@@ -66,15 +78,13 @@ def _runTask(
             # on the same machine by simply changing the taskId in the
             # filename.
             task._lgTask_logFile = logFile
-            if setProcTitle:
-                setProcessTitle(task, processorHome)
 
             # Wait for the Processor to fill out our pid file; this ensures 
             # that if the processor crashes after setting our state to working
             # and after launching us, then it can justifiably claim that we
             # have died when it does not find the pid file.
             waitFor = 5 #seconds
-            sleepTime = 0.5
+            sleepTime = 0.1
             while True:
                 with open(pidFileName, 'r') as f:
                     if f.read() == str(os.getpid()):
@@ -96,13 +106,13 @@ def _runTask(
         except RetryTaskError, e:
             log("Retrying task after {0}".format(e.delay))
             success = e
-        except Exception, e:
+        except:
             log("Unhandled exception: " + traceback.format_exc())
             success = False
-        finally:
-            conn.taskStopped(taskId, taskData, success, lastLogMessage[0])
-            # If taskStopped ran successfully, then we have finished execution
-            # properly and should remove our pid file
-            os.remove(pidFileName)
+    finally:
+        conn.taskStopped(taskId, taskData, success, lastLogMessage[0])
+        # If taskStopped ran successfully, then we have finished execution
+        # properly and should remove our pid file
+        os.remove(pidFileName)
 
 

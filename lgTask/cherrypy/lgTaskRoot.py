@@ -17,6 +17,7 @@ class TaskView(Control):
     sort = None
     limit = None
     conn = None
+    showKill = False
         
     def build(self):
         # Run query, fill in table!
@@ -30,12 +31,20 @@ class TaskView(Control):
                  , ('state', 'State')
                  , ('tsStart', 'Started')
                  , ('tsStop', 'Stopped'), ('lastLog', 'Last Log') ]
-        table = Table(len(cells) + 1)
+        cols = len(cells) + 1
+        if self.showKill:
+            cols += 1
+        table = Table(cols)
+        if self.showKill:
+            table.add_cell(TextControl(text = 'kill'))
         table.add_cell(TextControl(text = 'Task ID'))
         for c in cells:
             table.add_cell(TextControl(text = c[1]))
         for t in tasks:
             i = t['_id']
+            if self.showKill:
+                table.add_cell(LiteralControl(
+                    html = '<a href="killTask?id={0}">kill</a>'.format(i)))
             table.add_cell(LiteralControl(
                     html = '<a href="taskLog?id={0}">{0}</a>'.format(i)))
             for c in cells:
@@ -85,6 +94,7 @@ class LgTaskRoot(object):
             )
             , sort = [ ('tsRequest', 1 ) ]
             , limit = 10
+            , showKill = True
         ))
         body.append(TaskView(
             title = 'Upcoming Tasks'
@@ -105,6 +115,13 @@ class LgTaskRoot(object):
             , limit = 10
         ))
         return body.gethtml()
+
+
+    @cherrypy.expose
+    def killTask(self, id):
+        """Kill task with id"""
+        self._conn.killTask(id)
+        raise cherrypy.HTTPRedirect('../')
 
 
     @cherrypy.expose

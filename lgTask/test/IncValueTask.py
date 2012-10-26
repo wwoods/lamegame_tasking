@@ -5,7 +5,10 @@ class IncValueTask(lgTask.Task):
     def run(self, db, id, delay=0):
         if delay:
             import time
-            time.sleep(delay)
+            stop = time.time() + delay
+            while time.time() < stop:
+                # Do busy wait, since kill() can't interrupt syscalls
+                time.sleep(0.1)
 
         old = db.find_one({ 'id': id })['value']
         self.log("Old: {0}".format(old))

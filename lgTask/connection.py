@@ -60,10 +60,12 @@ class Connection(object):
         """Various states and collections of states."""
         REQUEST = 'request'
         WORKING = 'working'
+        KILL = 'kill'
         SUCCESS = 'success'
         RETRIED = 'retried'
         ERROR = 'error'
         NOT_STARTED_GROUP = [ 'request' ]
+        RUNNING_GROUP = [ 'working', 'kill' ]
         DONE_GROUP = [ 'success', 'retried', 'error' ]
     
     bindingsEncode = [ _encodePyMongo ]
@@ -278,15 +280,24 @@ class Connection(object):
         """Gets the document for the given task."""
         return self._database[self.TASK_COLLECTION].find_one(taskId)
 
+    def getTasksToKill(self, taskIdList):
+        """Gets tasks that should be killed in the given list."""
+        r = self._database[self.TASK_COLLECTION].find({
+            '_id': { '$in': taskIdList }
+            , 'state': 'kill'
+        }, fields = [])
+        return [ t['_id'] for t in r ]
+
     def getWorking(self, host = False, taskClass = None):
-        """Get pymongo cursor of working tasks' _id and tsStart
+        """Get pymongo cursor of working tasks' _id and tsStart.  Includes tasks
+        in the "kill" state, since they are technically running.
 
         host -- If True, only on this host.  Also, don't include tasks with
-            a splinterId attribute, since they are not actually "working"
+            a splinterId attribute, since they are not actually "running"
             persay.
         taskClass -- Only show this taskClass
         """
-        query = { 'state': 'working' }
+        query = { 'state': { '$in': self.states.RUNNING_GROUP } }
         if host:
             query['host'] = socket.gethostname()
             query['splinterId'] = { '$exists': 0 }
@@ -377,6 +388,35 @@ class Connection(object):
             , 'priority': priority
         }
         return self._createTask(now, taskClass, taskArgs, kwargs)
+
+    def killTask(self, taskId):
+        """Marks the given task for death, if it is in a working state and is 
+        not splintered.
+
+        If the task is not splintered and is in a not started state, marks it
+        as error and sets lastLog to "killed before start".
+        """
+        now = datetime.utcnow()
+        self._database[self.TASK_COLLECTION].update(
+            {
+                '_id': taskId
+                , 'state': { '$in': self.states.NOT_STARTED_GROUP }
+                , 'splinterId': { '$exists': False }
+            }
+            , { '$set': { 
+                'state': self.states.ERROR
+                , 'lastLog': 'killed before start'
+                , 'tsStop': now
+            }}
+        )
+        self._database[self.TASK_COLLECTION].update(
+            { 
+                '_id': taskId
+                , 'state': self.states.WORKING
+                , 'splinterId': { '$exists': False } 
+            }
+            , { '$set': { 'state': self.states.KILL } }
+        )
 
     def _startTask(self, availableTasks):
         """Gets a task from our database and marks it in the database as 

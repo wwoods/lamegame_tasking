@@ -18,7 +18,7 @@ import threading
 import time
 import traceback
 from lgTask import Connection, Task, _runTask
-from lgTask.errors import ProcessorAlreadyRunningError
+from lgTask.errors import KillTaskError, ProcessorAlreadyRunningError
 from lgTask.lib import portalocker
 from lgTask.lib.interruptableThread import InterruptableThread
 from lgTask.lib.reprconf import Config
@@ -140,6 +140,13 @@ class Processor(object):
     _LOG_DIR = "logs/"
     _LOG_DIR_doc = """Directory used for logs; only for testing.  Must end
             in slash."""
+
+    KILL_INTERVAL = 5
+    KILL_INTERVAL_doc = """Seconds between checking if we should kill a task"""
+
+    KILL_TOLERANCE = 10
+    KILL_TOLERANCE_doc = """Min seconds between sending a kill message to a 
+            task.  Used to prevent killing cleanup code."""
     
     def __init__(self, home='.'):
         """Creates a new task processor operating out of the current working
@@ -420,7 +427,7 @@ class Processor(object):
                     continue
                 logFile = self.getPath(self._LOG_DIR + log)
                 mtime = os.path.getmtime(logFile)
-                if mtime < cutoff:
+                if mtime <= cutoff:
                     # taskId is just log name without ".log"
                     taskId = log[:-4]
                     task = c.getTask(taskId)
@@ -474,6 +481,11 @@ class Processor(object):
                             )
                         )
 
+                # For the monitor, we need a method to poll child processes to
+                # see if they have exited (since os.kill() will silently do
+                # nothing if they are a zombie process, we need to wait on them
+                # to see if they're not a zombie)
+                childPoll = None
                 with open(self._getPidFile(taskId), 'w') as pidFile:
                     pid = None
                     if self._useThreading:
@@ -484,6 +496,7 @@ class Processor(object):
                         # We use the process variable to get our pid for 
                         # tracking the new task; the slave process suffices
                         pid = slave.pid
+                        childPoll = slave.is_alive
                     elif self._useMultiprocessing:
                         args = ( 
                             self._tasksAvailable[taskData['taskClass']]
@@ -497,6 +510,7 @@ class Processor(object):
                         )
                         process.start()
                         pid = process.pid
+                        childPoll = process.is_alive
                     else:
                         # Get our task runner script
                         taskRunner = os.path.abspath(os.path.join(
@@ -507,11 +521,12 @@ class Processor(object):
                         args = (taskRunner,taskId,self._home)
                         process = subprocess.Popen(args)
                         pid = process.pid
+                        childPoll = process.poll
 
                     # Start was successful, start a PID file and monitor it
                     pidFile.write(str(pid))
 
-                self._monitorPid(taskId, pid, latestStartTime)
+                self._monitorPid(taskId, pid, latestStartTime, childPoll)
                 return True
             except Exception as e:
                 try:
@@ -626,62 +641,80 @@ class Processor(object):
                         latestStart = datetime.datetime.utcfromtimestamp(
                             os.path.getmtime(path)
                         )
-                        self._monitorPid(tid, pid, latestStart)
+                        self._monitorPid(tid, pid, latestStart, None)
                 except Exception, e:
                     self.log("Error on loading task pid {0}: {1}".format(
                         tid, e
                     ))
 
-    def _monitorPid(self, tid, pid, latestStart):
+    def _monitorPid(self, tid, pid, latestStart, childProcessPoll):
         """Monitors the specified task, which is running under the given pid.
 
         latestStart - See _monitorPid_thread
         """
         t = threading.Thread(
             target=self._monitorPid_thread
-            , args=(tid, pid, latestStart)
+            , args=(tid, pid, latestStart, childProcessPoll)
         )
         t.daemon = True
         self._monitors[tid] = t
         t.start()
         self.log("Monitoring task {0}:{1}".format(tid, pid))
     
-    def _monitorPid_thread(self, tid, pid, latestStart):
+    def _monitorPid_thread(self, tid, pid, latestStart, childProcessPoll):
         """Monitors the given process until it terminates.  This thread is
         daemonic; that is, it is assumed insignificant if it dies (it must
         be able to recover).
+
+        Also responsible for polling the database periodically to see if a 
+        "kill" command has been issued for our task.
 
         This thread is responsible for cleaning up the pid file on task
         completion.
 
         latestStart - An upper bound on the start time for the process.  Used
             for preventing database corruption on task death.
+        childProcessPoll - If set, a parameterless method to poll the child
+            process.  This is used to "retire" zombie processes.
         """
         while True:
             try:
-                try:
-                    # For efficiency, we want to use event-driven wait for
-                    # a process if possible.
-                    if not self._useThreading:
-                        os.waitpid(pid, 0)
-                    else:
-                        # The pid being alive can still mean the task is dead.
-                        # We also have to periodically check the pid file
-                        raise OSError
-                except OSError:
-                    # If we're waiting on a non-child process, we have to do 
-                    # our own polling loop
-                    while True:
-                        try:
-                            os.kill(pid, 0)
-                            if self._useThreading:
-                                if not os.path.exists(self._getPidFile(tid)):
-                                    # Task marked as done, don't need to wait
-                                    # on pid to exit
-                                    raise OSError
-                            time.sleep(1.0)
-                        except OSError:
-                            break
+                # While os.waitpid() would be more efficient, we need to check
+                # periodically to see if our task's state has been changed to
+                # kill.  So we do a rather lazy check.
+                # Fortunately, this also works on non-child processes
+                # (os.waitpid does not)
+                lastKillCheck = time.time()
+                while True:
+                    try:
+                        if childProcessPoll:
+                            childProcessPoll()
+                        os.kill(pid, 0)
+                        if self._useThreading:
+                            if not os.path.exists(self._getPidFile(tid)):
+                                # Task marked as done, don't need to wait
+                                # on pid to exit
+                                raise OSError
+                        else:
+                            # Check for kill status?
+                            now = time.time()
+                            if lastKillCheck + self.KILL_INTERVAL >= now:
+                                lastKillCheck = now
+                                if (
+                                        len(self.taskConnection.getTasksToKill(
+                                            [ tid ]))
+                                        == 1
+                                    ):
+                                    # Send a terminate message, and sleep again
+                                    os.kill(pid, signal.SIGTERM)
+                                    # Ensure that the next kill signal isn't
+                                    # sent for a larger interval, to prevent
+                                    # killing cleanup code
+                                    lastKillCheck += self.KILL_TOLERANCE
+                        time.sleep(min(self.KILL_INTERVAL, 0.5))
+                    except OSError:
+                        # Task must be dead
+                        break
             except Exception, e:
                 self.log("Monitor exception for {0}:{1} - {2}".format(
                     tid, pid, e
@@ -787,6 +820,9 @@ class _ProcessorSlave(multiprocessing.Process):
         self._isAccepting = multiprocessing.Value('b', True)
         self._runningCount = multiprocessing.Value('i', 0)
         self._startTime = time.time()
+        # No need to check kill right away, after all, we would have just 
+        # accepted something
+        self._lastKillCheck = self._startTime
 
 
     def execute(self, taskData):
@@ -832,6 +868,8 @@ class _ProcessorSlave(multiprocessing.Process):
             # Oh Mac OS X, how silly you are sometimes
             canQsize = False
 
+        self._fixSigTerm()
+
         # Any tasks that we start only really need a teeny bit of stack
         thread.stack_size(1024 * 1024)
         try:
@@ -847,11 +885,15 @@ class _ProcessorSlave(multiprocessing.Process):
                     self._checkRunning()
 
                     # Get new task
-                    taskData = self._queue.get(timeout = 4)
-                    taskThread = threading.Thread(
+                    taskData = self._queue.get(
+                        timeout = self._processor.KILL_INTERVAL
+                    )
+                    taskThread = InterruptableThread(
                         target = self._runTaskThreadMain
                         , args = (taskData,)
                     )
+                    # Remember the ID so that we can check for "kill" states
+                    taskThread.taskId = taskData['_id']
                     taskThread.start()
                     self._running.append(taskThread)
                     
@@ -899,10 +941,34 @@ class _ProcessorSlave(multiprocessing.Process):
 
     def _checkRunning(self):
         """Check on running threads"""
+        now = time.time()
+        if self._lastKillCheck + self._processor.KILL_INTERVAL <= now:
+            self._lastKillCheck = now
+            allIds = [ t.taskId for t in self._running ]
+            killIds = self._connection.getTasksToKill(allIds)
+            for t in self._running:
+                if t.taskId in killIds:
+                    t.raiseException(KillTaskError)
+                    # And prevent us from trying to kill again for a slightly
+                    # longer interval
+                    self._lastKillCheck = now + self._processor.KILL_TOLERANCE
+
         for i in reversed(range(len(self._running))):
             t = self._running[i]
             if not t.is_alive():
                 self._running.pop(i)
+
+
+    def _fixSigTerm(self):
+        """Register our SIGTERM handler - that is, convert a sigterm on 
+        ourselves into a KillTaskError on all of our tasks, and stop accepting
+        once we get a sigterm.
+        """
+        def handleSigTerm(signum, frame):
+            for t in self._running:
+                t.raiseException(KillTaskError)
+            self._isAccepting.value = False
+        signal.signal(signal.SIGTERM, handleSigTerm)
 
 
     def _runTaskThreadMain(self, taskData):
@@ -916,7 +982,7 @@ class _ProcessorSlave(multiprocessing.Process):
                 , taskData
                 , self._connection
                 , self._processorHome
-                , setProcTitle = False
+                , isThread = True
             )
         except Exception:
             self._processor.error('In or after _runTask')

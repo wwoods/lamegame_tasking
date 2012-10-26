@@ -3,5 +3,7 @@ build
 dist
 *.egg-info
 benchmarks/tmp
+lgTask/test/testProcessor/processor.cfg
+lgTask/test/testProcessor2/processor.cfg
 lgTask/talk/test/testProcessor
 
