@@ -156,6 +156,11 @@ class Processor(object):
         """
         self._home = os.path.abspath(home)
         self.config = Config(self.getPath("processor.cfg"))['processor']
+        allowed = [ 'taskDatabase', 'pythonPath', 'threaded' ]
+        for k in self.config.keys():
+            if k not in allowed:
+                raise ValueError("Processor parameter {0} unrecognized".format(
+                        k))
 
         connection = Connection(self.config['taskDatabase'])
         connection._ensureIndexes()

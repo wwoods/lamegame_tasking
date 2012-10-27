@@ -19,6 +19,14 @@ from lgTask.lib.timeInterval import TimeInterval
 from lgTask.test.processorTestCase import ProcessorTestCase
 
 class TestCore(ProcessorTestCase):
+    def setUp(self):
+        ProcessorTestCase.setUp(self)
+        with open('processor.cfg', 'w') as f:
+            f.write("""[processor]
+taskDatabase = "pymongo://localhost/test_lgTask"
+pythonPath = [ "./tasks2" ]
+""")
+
     def test_batchKwargs(self):
         # See if scheduling two batches with the same name but different
         # kwargs raises a TaskKwargError
@@ -48,6 +56,12 @@ class TestCore(ProcessorTestCase):
         self.conn.batchTask('1 second', 'IncValueTask', id='a', taskName='k')
         newTask = taskDb.find_one({ '_id': 'IncValueTask-k' })
         self.assertEqual('request', newTask['state'])
+
+    def test_processorBadConfig(self):
+        # See if an invalid parameter key being in the config doesn't work
+        open('processor.cfg', 'a').write('dog = "mine"\n')
+        with self.assertRaises(ValueError):
+            lgTask.Processor()
 
     def test_processorCleanup(self):
         # Ensure that a processor will clean up old logs properly
