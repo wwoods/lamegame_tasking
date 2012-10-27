@@ -856,6 +856,17 @@ class _ProcessorSlave(multiprocessing.Process):
 
 
     def run(self):
+        # If we can, replace lgTaskProcessor with lgTaskSlave in our title
+        try:
+            import setproctitle
+            title = setproctitle.getproctitle()
+            if 'lgTaskProcessor' in title:
+                title = title.replace('lgTaskProcessor', 'lgTaskSlave')
+            else:
+                title += ' --slave'
+            setproctitle.setproctitle(title)
+        except ImportError:
+            pass
         # We're in our own process now, so disconnect the processor's 
         # pymongo connection to make sure we don't hold those sockets open
         self._processor.taskConnection.close()
