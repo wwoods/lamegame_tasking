@@ -410,12 +410,10 @@ var Controls = UiBase.extend({
         var smootherDiv = $('<div></div>').appendTo(this._content);
         smootherDiv.append('Smooth hours: ');
         var smoother = $('<input type="text" />').appendTo(smootherDiv);
-        smoother.val('1');
         
         var expectedDiv = $('<div></div>').appendTo(this._content);
         expectedDiv.append('Expected / grp (eval): ');
         var expected = $('<input type="text" />').appendTo(expectedDiv);
-        expected.val('1');
         
         var ok = new UiBase('<input type="button" value="Refresh" />');
         this._content.append(ok);
@@ -638,51 +636,88 @@ var Graph = UiBase.extend({
         var movingTimeBase = movingTime;
         for (var i = 0, m = pointTimes.length; i < m; i++) {
             //We're actually going to compute a moving sum of partial data 
-            //points - that is, we assume our counters are uniformly distributed
+            //points - that is, we assume our samples are uniformly distributed
             //between the two points they represent (dataTime through
             //dataTime + srcInterval, exclusive on the latter bound).  By
             //doing this, we avoid awkward discrete computations that can
             //really cause errors in certain situations (e.g. those with
             //expectedPerGroup or specific smoothing intervals)
             var newTail = pointTimes[i] - smoothSecs; 
-            while (movingTime <= newTail) {
+            while (movingTime < newTail) {
                 //Take off of moving summation
                 var timeLeft = newTail - movingTime;
                 var partLeft = movingTimeBase + srcInterval - movingTime;
-                if (timeLeft >= partLeft) {
-                    //Take off the whole rest of the point
-                    movingTotal -= (parseFloat(rawData[movingIndex]) * partLeft
-                            / srcInterval);
-                    movingTime = movingTimeBase + srcInterval;
-                    movingTimeBase = movingTime;
-                    movingIndex += 1;
+                
+                if (stat.type === 'count') {
+                    if (timeLeft < partLeft) {
+                        //Remove none of count's value until the data point
+                        //is completely out of the window
+                        movingTime = newTail;
+                    }
+                    else {
+                        //Remove the whole value
+                        movingTotal -= parseFloat(rawData[movingIndex]);
+                        movingTime = movingTimeBase + srcInterval;
+                        movingTimeBase = movingTime;
+                        movingIndex += 1;
+                    }
                 }
-                else {
-                    //Take off part of the point and we're done
-                    movingTotal -= (parseFloat(rawData[movingIndex]) * timeLeft
-                            / srcInterval);
-                    movingTime = newTail;
-                    break;
+                else if (stat.type === 'total') {
+                    if (timeLeft >= partLeft) {
+                        //Take off the whole rest of the point
+                        movingTotal -= (parseFloat(rawData[movingIndex]) 
+                                * partLeft
+                                / srcInterval);
+                        movingTime = movingTimeBase + srcInterval;
+                        movingTimeBase = movingTime;
+                        movingIndex += 1;
+                    }
+                    else {
+                        //Take off part of the point and we're done
+                        movingTotal -= (parseFloat(rawData[movingIndex]) 
+                                * timeLeft
+                                / srcInterval);
+                        movingTime = newTail;
+                    }
                 }
             }
-            while (srcIndex < rawData.length && srcTime <= pointTimes[i]) {
+            while (srcIndex < rawData.length && srcTime < pointTimes[i]) {
                 //Moving summation
                 var timeLeft = pointTimes[i] - srcTime;
                 var partLeft = srcTimeBase + srcInterval - srcTime;
-                if (timeLeft >= partLeft) {
-                    //Rest of the point!
-                    movingTotal += (parseFloat(rawData[srcIndex]) * partLeft
-                            / srcInterval);
-                    srcTime = srcTimeBase + srcInterval;
-                    srcTimeBase = srcTime;
-                    srcIndex += 1;
+                
+                if (stat.type === 'count') {
+                    //We want the first instance to count for everything
+                    if (srcTime === srcTimeBase) {
+                        //We're at the first point, add it
+                        movingTotal += parseFloat(rawData[srcIndex]);
+                    }
+                    
+                    //Are we moving to a new point?
+                    if (timeLeft >= partLeft) {
+                        srcTime = srcTimeBase + srcInterval;
+                        srcTimeBase = srcTime;
+                        srcIndex += 1;
+                    }
+                    else {
+                        srcTime = pointTimes[i];
+                    }
                 }
-                else {
-                    //Partial point and done
-                    movingTotal += (parseFloat(rawData[srcIndex]) * timeLeft
-                            / srcInterval);
-                    srcTime = pointTimes[i];
-                    break;
+                else if (stat.type === 'total') {
+                    if (timeLeft >= partLeft) {
+                        //Rest of the point!
+                        movingTotal += (parseFloat(rawData[srcIndex]) * partLeft
+                                / srcInterval);
+                        srcTime = srcTimeBase + srcInterval;
+                        srcTimeBase = srcTime;
+                        srcIndex += 1;
+                    }
+                    else {
+                        //Partial point and done
+                        movingTotal += (parseFloat(rawData[srcIndex]) * timeLeft
+                                / srcInterval);
+                        srcTime = pointTimes[i];
+                    }
                 }
             }
             
