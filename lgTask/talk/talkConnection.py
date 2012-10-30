@@ -24,7 +24,7 @@ try:
         server = rfoo.InetServer(_RfooRpcClient)
         thread = threading.Thread(
             target = server.start
-            , kwargs = dict(port = 0)
+            , kwargs = dict(host = '0.0.0.0', port = 0)
         )
         thread.daemon = True
         thread.start()
@@ -66,7 +66,7 @@ except ImportError:
         Pyro4.config.COMPRESSION = False #Faster without...
         
         def _rpcSpawnServer(talkServer):
-            server = Pyro4.Daemon(host = socket.gethostname())
+            server = Pyro4.Daemon(host = '0.0.0.0')
             uri = server.register(talkServer)
             thread = threading.Thread(target = server.requestLoop)
             thread.daemon = True
