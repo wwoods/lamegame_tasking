@@ -97,10 +97,6 @@ class StatsInterface(object):
         oldTimeVal = timeVal
         timeVal = blocks[0][3]
         
-        print("Old time: " + str(oldTimeVal))
-        print("New time: " + str(timeVal))
-        print("Now time: " + str(timeNow))
-        
         # For any given layer, we cannot insert data older than the 
         # blockStartTime, since that would mean we're overwriting newer data.
 
