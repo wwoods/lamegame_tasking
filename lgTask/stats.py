@@ -142,6 +142,12 @@ class StatsInterface(object):
                 sets = {}
                 incs = {}
                 updates = { '$set': sets, '$inc': incs }
+                
+                newValue = 0
+                if myType != 'add':
+                    # Anything except for add needs to know about null
+                    # values instead of zeroes
+                    newValue = None
                 for layer, oldBlock in enumerate(oldBlocks):
                     # We don't want to update the record that corresponds
                     # with the old tsLatest, since it's already up-to-date
@@ -154,7 +160,7 @@ class StatsInterface(object):
                     while oldIndex != blocks[layer][0]:
                         block = 'block.' + str(layer)
                         key = block + '.' + str(oldIndex)
-                        sets[key] = 0
+                        sets[key] = newValue
                         # Rotate to next block
                         oldIndex = (oldIndex + 1) % oldBlock[1]
                     if myType == 'add':
@@ -269,18 +275,23 @@ class StatsInterface(object):
             # We have our data, ok.  What of it isn't recent?
             blocksLatest = self._getBlocks(tsLatest, schema['intervals'])
             blockLatest = blocksLatest[layer]
+            
+            zeroValue = 0
+            if schema.get('type', 'add') != 'add':
+                # Non-add schemas should default to None for unknown values
+                zeroValue = None
             if blockStart[0] <= blockLatest[0] < blockStop[0]:
                 # Latest stats between requested, need to set some zeroes
                 for b in xrange(blockLatest[0] + 1, blockStop[0] + 1):
-                    data[-1 + b - blockStop[0]] = 0
-            elif blockStop[0] < blockStart[0] < blockLatest[0]:
+                    data[-1 + b - blockStop[0]] = zeroValue
+            elif blockStop[0] < blockStart[0] <= blockLatest[0]:
                 # Same
                 for b in xrange(blockLatest[0] - blockStart[0] + 1, len(data)):
-                    data[b] = 0
+                    data[b] = zeroValue
             elif blockLatest[0] < blockStop[0] < blockStart[0]:
                 # Same
                 for b in xrange(blockLatest[0] + 1, blockStop[0] + 1):
-                    data[-1 + b - blockStop[0]] = 0
+                    data[-1 + b - blockStop[0]] = zeroValue
 
             return {
                 'values': data

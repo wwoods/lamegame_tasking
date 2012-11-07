@@ -3,7 +3,6 @@ import cherrypy
 import datetime
 import lgTask
 from lgTask.cherrypy.staticServer import StaticServer
-from lgTask.cherrypy.stats import StatsRoot
 from lgTask.lib.timeInterval import TimeInterval
 import os
 
@@ -68,7 +67,6 @@ class LgTaskRoot(object):
         given lgTask.Connection and its processors.
         """
         self._conn = connection
-        self.stats = StatsRoot(self._conn)
 
 
     @cherrypy.expose

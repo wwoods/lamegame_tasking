@@ -65,16 +65,19 @@ class TestStats(TestCase):
             add(i)
         r = self.stats.getStat('test', self.now, n[0])
         r2 = self.stats.getStat('test-sample', self.now, n[0])
+        expected2 = expected[:]
         expected.append(0)
+        # samples add None instead of 0
+        expected2.append(None)
         self.assertEqual(expected, r['values'])
-        self.assertEqual(expected, r2['values'])
+        self.assertEqual(expected2, r2['values'])
         self.assertEqual(180.0, r['tsInterval'])
 
         # Test the next interval up
         # (Note we add 1 since getStat() returns inclusive for both bounds)
         for i in range(24*60*60 / (15*60) - len(expectedDayAdd) + 1):
             expectedDayAdd.append(0)
-            expectedDaySet.append(0)
+            expectedDaySet.append(None)
         r = self.stats.getStat('test', self.now
             , self.now + datetime.timedelta(seconds = 24*60*60))
         self.assertEqual(expectedDayAdd, r['values'])
@@ -83,34 +86,42 @@ class TestStats(TestCase):
         self.assertEqual(expectedDaySet, r2['values'])
 
 
-    def test_noDataForAwhile(self):
-        # This timestamp always has the same base value
+    def test_noDataForAwhile(self, statName = 'test', statZero = 0):
+        # This timestamp always has the same base value - it is over a split
+        nnow = datetime.datetime(2012, 11, 7, 5, 16, 14, 164807)
+        nnow = (nnow - datetime.datetime.utcfromtimestamp(0)).total_seconds()
         self.now = datetime.datetime.utcfromtimestamp(
-            self.stats._getBlocks(self.stats._getTimeVal(None), [(6*60*60,100)]
-                )[0][3] + 30)
+            self.stats._getBlocks(nnow, [(6*60*60,100)])[0][3] + 30)
         firstVal = 43
 
         old = self.now - datetime.timedelta(seconds = 50*60)
         ancient = old - datetime.timedelta(seconds = 180)
-        self.stats._tryNewStat(self.stats._getSchemaFor('test'), 'test',
+        self.stats._tryNewStat(self.stats._getSchemaFor(statName), statName,
                 self.stats._getTimeVal(ancient), randomize = True)
         # Since the collection is marked as having latest data from old, if
         # we get stats from then on, we should get a bunch of zeroes.
-        self.stats.addStat('test', firstVal, time = old)
-        r = self.stats.getStat('test', start = old, stop = self.now)
+        self.stats.addStat(statName, firstVal, time = old)
+        r = self.stats.getStat(statName, start = old, stop = self.now)
         print("interval: " + str(r['tsInterval']))
-        for v in r['values'][1:]:
-            self.assertEqual(0, v)
+        print(r['values'])
+        for i, v in enumerate(r['values'][1:]):
+            print("looking at {0} of {1}".format(i, len(r['values']) - 1))
+            self.assertEqual(statZero, v)
         self.assertEqual(firstVal, r['values'][0])
 
         # Now write and see what happens - ensure that the old value wasn't
         # overwritten, the in-betweens were, and the new value is ok
-        self.stats.addStat('test', 1000, time = self.now)
-        r = self.stats.getStat('test', start = old, stop = self.now)
+        self.stats.addStat(statName, 1000, time = self.now)
+        r = self.stats.getStat(statName, start = old, stop = self.now)
         for v in r['values'][1:-1]:
-            self.assertEqual(0, v)
+            self.assertEqual(statZero, v)
         self.assertEqual(firstVal, r['values'][0])
         self.assertEqual(1000, r['values'][-1])
+        
+        
+    def test_noDataForSample(self):
+        # Ensure that "None" is the default replacement value for "set" schemas
+        self.test_noDataForAwhile(statName = 'test-sample', statZero = None)
 
 
     def test_reset(self):
