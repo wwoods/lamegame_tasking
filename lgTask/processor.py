@@ -155,32 +155,43 @@ class Processor(object):
         home -- The directory to run the processor out of.
         """
         self._home = os.path.abspath(home)
-        self.config = Config(self.getPath("processor.cfg"))['processor']
-        allowed = [ 'taskDatabase', 'pythonPath', 'threaded' ]
-        for k in self.config.keys():
-            if k not in allowed:
-                raise ValueError("Processor parameter {0} unrecognized".format(
-                        k))
 
-        connection = Connection(self.config['taskDatabase'])
-        connection._ensureIndexes()
-        self.taskConnection = connection
-        
-        # Add other path elements before trying imports
-        for i,path in enumerate(self.config.get('pythonPath', [])):
-            sys.path.insert(
-                i
-                , os.path.abspath(os.path.join(home, path))
-            )
-        
-        self._tasksAvailable = self._getTasksAvailable(self._home)
-        self._monitors = {}
+        # Once we have home set up, do everything in a try and log the error if
+        # we get one
+        try:
+            self.config = Config(self.getPath("processor.cfg"))['processor']
+            allowed = [ 'taskDatabase', 'pythonPath'
+                    , 'threaded', 'rconsole' 
+            ]
+            for k in self.config.keys():
+                if k not in allowed:
+                    raise ValueError(
+                            "Processor parameter '{0}' unrecognized".format(k))
 
-        self._cleanupThread = None
-        self._cleanupThread_doc = """Thread that cleans up the _LOG_DIR"""
+            connection = Connection(self.config['taskDatabase'])
+            connection._ensureIndexes()
+            self.taskConnection = connection
+            
+            # Add other path elements before trying imports
+            for i,path in enumerate(self.config.get('pythonPath', [])):
+                sys.path.insert(
+                    i
+                    , os.path.abspath(os.path.join(home, path))
+                )
+            
+            self._tasksAvailable = self._getTasksAvailable(self._home)
+            self._monitors = {}
 
-        self._startTaskQueue = Queue()
-        self._stopOnNoTasks = False
+            self._cleanupThread = None
+            self._cleanupThread_doc = """Thread that cleans up the _LOG_DIR"""
+
+            self._startTaskQueue = Queue()
+            self._stopOnNoTasks = False
+
+            self._useRConsole = self.config.get('rconsole', False)
+        except:
+            self.error('During init')
+            raise
 
     def error(self, message):
         error = traceback.format_exc()
@@ -512,6 +523,7 @@ class Processor(object):
                         process = multiprocessing.Process(
                             target=_runTask
                             , args=args
+                            , kwargs = dict(useRConsole = self._useRConsole)
                         )
                         process.start()
                         pid = process.pid
@@ -885,6 +897,11 @@ class _ProcessorSlave(multiprocessing.Process):
             canQsize = False
 
         self._fixSigTerm()
+
+        # rconsole?
+        if self._processor._useRConsole:
+            import lgTask.lib.rfooUtil as rfooUtil
+            rfooUtil.spawnServer()
 
         # Any tasks that we start only really need a teeny bit of stack
         thread.stack_size(1024 * 1024)

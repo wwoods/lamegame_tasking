@@ -1,6 +1,7 @@
 
 import datetime
 import signal
+import threading
 import time
 import traceback
 import os
@@ -27,6 +28,7 @@ def _runTask(
     , taskConnection
     , processorHome
     , isThread = False
+    , useRConsole = False
     ):
     def getLogForId(id):
         return processorHome + '/logs/' + str(id) + '.log'
@@ -50,6 +52,14 @@ def _runTask(
     # If anything goes wrong, default state is error
     success = False
     try:
+        # Set our python thread name
+        threading.current_thread().setName('lgTask-' + str(taskId))
+
+        # Launch rconsole?
+        if useRConsole:
+            import lgTask.lib.rfooUtil as rfooUtil
+            rfooUtil.spawnServer()
+
         if not isThread:
             # If we're not a thread, then we should change the process
             # title to make ourselves identifiable, and also register
