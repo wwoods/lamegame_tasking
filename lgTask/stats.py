@@ -32,6 +32,10 @@ class StatsInterface(object):
     """
 
     SCHEMA_UPDATE_INTERVAL = 60 # seconds
+    
+    _TEST_TIME_NOW = None
+    _TEST_TIME_NOW_doc = """Testing, _getTimeVal(None) will return the value
+            for this if it is a datetime object"""
 
     def __init__(self, statsCollection):
         self._epoch = datetime.datetime.utcfromtimestamp(0)
@@ -70,6 +74,9 @@ class StatsInterface(object):
                 time.time() comes back in local time...
         """
         timeVal = self._getTimeVal(time)
+        timeNow = timeVal
+        if time is not None:
+            timeNow = self._getTimeVal(None)
         if isinstance(path, list):
             path = '.'.join([ str(n).replace('.', '-') for n in path ])
 
@@ -89,6 +96,13 @@ class StatsInterface(object):
         # unnecessary amounts of shifting
         oldTimeVal = timeVal
         timeVal = blocks[0][3]
+        
+        print("Old time: " + str(oldTimeVal))
+        print("New time: " + str(timeVal))
+        print("Now time: " + str(timeNow))
+        
+        # For any given layer, we cannot insert data older than the 
+        # blockStartTime, since that would mean we're overwriting newer data.
 
         # Mongodb syntax - to get fields, use 
         # find(fields = { 'valArray': { '$slice': [ idx, len ] }})
@@ -101,13 +115,18 @@ class StatsInterface(object):
         fields = { 'tsLatest': 1 }
         for layer, blockInfo in enumerate(blocks):
             block = 'block.' + str(layer)
-            key = block + '.' + str(blockInfo[0])
-            if myType == 'set':
-                sets[key] = value
-            elif myType == 'add':
-                deltas[key] = value
-            else:
-                raise ValueError("Unknown type: " + myType)
+            
+            # Is this block too old to write to?  Meaning, the data that
+            # we're trying to write is from so long ago that it simply will
+            # not effect the value of this block
+            if blockInfo[3] + (blockInfo[1] - 1) * blockInfo[2] >= timeNow:
+                key = block + '.' + str(blockInfo[0])
+                if myType == 'set':
+                    sets[key] = value
+                elif myType == 'add':
+                    deltas[key] = value
+                else:
+                    raise ValueError("Unknown type: " + myType)
 
             fields[block] = { '$slice': [ blockInfo[0], 1 ] }
 
@@ -119,59 +138,74 @@ class StatsInterface(object):
             , fields = fields
         )
         if r is not None:
-            # Are they from an old bucket?
+            # Are they from an old bucket?  We need to look at each block
+            # individually, since we also fill in missing buckets with zeroes
             oldLatest = r['tsLatest']
             oldBlocks = self._getBlocks(oldLatest, schema['intervals'])
-            if oldLatest + (oldBlocks[0][1] - 1) * oldBlocks[0][2] < timeVal:
-                # They need a reset; the oldest data is older than all of the
-                # current blocks could be.
-                self._col.remove({ '_id': path })
-                newSchema = schema.copy()
-                newSchema['version'] = 0
-                self._tryNewStat(newSchema, path, timeVal)
-                return self.addStat(path, value, time = time)
-            elif oldBlocks[0][0] != blocks[0][0]:
-                # They need an update... something to keep in mind: since we've
-                # replaced tsLatest with our tsLatest, no-one else should be
-                # responsible for updating the missing buckets since they'll
-                # see our tsLatest.
-
-                # So, just zero out all of the unused buckets.  And then for
-                # the current bucket, if we're using a counter, adjust off
-                # the old value (from the last rollover).
-                sets = {}
-                incs = {}
-                updates = { '$set': sets, '$inc': incs }
+            
+            newValue = 0
+            if myType != 'add':
+                # Anything except for add needs to know about null
+                # values instead of zeroes
+                newValue = None
                 
-                newValue = 0
-                if myType != 'add':
-                    # Anything except for add needs to know about null
-                    # values instead of zeroes
-                    newValue = None
-                for layer, oldBlock in enumerate(oldBlocks):
-                    # We don't want to update the record that corresponds
-                    # with the old tsLatest, since it's already up-to-date
-                    if oldBlock[0] == blocks[layer][0]:
-                        # This layer didn't roll over
-                        continue
+            # And keep track of updates, of course
+            sets = {}
+            incs = {}
+            updates = { '$set': sets, '$inc': incs }
+            for layer, oldBlock in enumerate(oldBlocks):
+                block = blocks[layer]
+            #if oldLatest + (oldBlocks[0][1] - 1) * oldBlocks[0][2] < timeVal:
+            #    # They need a reset; the oldest data is older than all of the
+            #    # current blocks could be.
+            #    self._col.remove({ '_id': path })
+            #    newSchema = schema.copy()
+            #    newSchema['version'] = 0
+            #    self._tryNewStat(newSchema, path, timeVal)
+            #    return self.addStat(path, value, time = time)
+            #elif oldBlocks[0][0] != blocks[0][0]:
+            
+                if block[3] != oldBlock[3]:
+                    # They need an update... something to keep in mind: since 
+                    # we've replaced tsLatest with our tsLatest, no-one else 
+                    # should be responsible for updating the missing buckets 
+                    # since they'll see our tsLatest.
 
-                    oldIndex = oldBlock[0]
-                    oldIndex += 1
-                    while oldIndex != blocks[layer][0]:
-                        block = 'block.' + str(layer)
-                        key = block + '.' + str(oldIndex)
-                        sets[key] = newValue
-                        # Rotate to next block
-                        oldIndex = (oldIndex + 1) % oldBlock[1]
+                    # So, just zero out all of the unused buckets.  And then for
+                    # the current bucket, if we're using a counter, adjust off
+                    # the old value (from the last rollover).]
+                    
+                    blockKey = 'block.' + str(layer) + '.'
+                    if oldLatest + (oldBlock[1] - 1) * oldBlock[2] < timeVal:
+                        # This layer needs an entire reset, all of the other
+                        # data is super old.  This case should be fairly rare,
+                        # so we're going to do the expensive thing and issue
+                        # a $set for every part of the block except the current
+                        oldIndex = block[0] + 1
+                        while oldIndex != block[0]:
+                            key = blockKey + str(oldIndex)
+                            sets[key] = newValue
+                            oldIndex = (oldIndex + 1) % oldBlock[1]
+                    else:
+                        # March along from old to new, zeroing out the gap
+                        oldIndex = oldBlock[0]
+                        oldIndex += 1
+                        while oldIndex != block[0]:
+                            key = blockKey + str(oldIndex)
+                            sets[key] = newValue
+                            # Rotate to next block
+                            oldIndex = (oldIndex + 1) % oldBlock[1]
+                        
                     if myType == 'add':
                         # Custom update for add for the new slot, since we 
                         # don't want to get rid of our counter and 
                         # counters since
                         slayer = str(layer)
-                        block = 'block.' + slayer
-                        key = block + '.' + str(blocks[layer][0])
+                        key = blockKey + str(block[0])
                         # Remove the old counter amount for this block
                         incs[key] = -r['block'][slayer][0]
+                        
+            if sets or incs:
                 self._col.update(
                     { '_id': path, 'schema.version': schemaVer }
                     , updates
@@ -180,7 +214,10 @@ class StatsInterface(object):
             # If the blocks are the same or they've already been updated since
             # our stat, all is well
         else:
-            # Can we update a document updated after us?
+            # Can we update a document updated after us?  Do NOT overwrite
+            # tsLatest in this case, since we've already gone over the data
+            # migration
+            del sets['tsLatest']
             r = self._col.find_and_modify(
                 { '_id': path, 'tsLatest': { '$gte': timeVal }
                         , 'schema.version': schemaVer }
@@ -387,7 +424,10 @@ class StatsInterface(object):
         seconds since epoch number.
         """
         if time is None:
-            time = datetime.datetime.utcnow()
+            if self._TEST_TIME_NOW is not None:
+                time = self._TEST_TIME_NOW
+            else:
+                time = datetime.datetime.utcnow()
         elif isinstance(time, float):
             # Assuming it's already seconds since epoch, UTC
             return time
