@@ -147,6 +147,10 @@ class Processor(object):
     KILL_TOLERANCE = 10
     KILL_TOLERANCE_doc = """Min seconds between sending a kill message to a 
             task.  Used to prevent killing cleanup code."""
+
+    MONITOR_CHECK_INTERVAL = 0.01
+    MONITOR_CHECK_INTERVAL_doc = """Minimum seconds between checking if tasks
+            have died."""
     
     def __init__(self, home='.'):
         """Creates a new task processor operating out of the current working
@@ -327,12 +331,15 @@ class Processor(object):
             self._startTaskQueue.put('any')
             lastScheduler = time.time()
             lastMonitor = 0.0
+            lastMonitorCheck = 0.0
+            self._lastMonitorCheckKill = 0.0
             lastStats = 0.0
             loadMult = self.LOAD_SLEEP_SCALE
             lastCleanup = 0.0
             while True:
                 lastScheduler = self._schedulerAudit(lastScheduler)
                 lastMonitor = self._monitorAudit(lastMonitor)
+                lastMonitorCheck = self._monitorCheckAudit(lastMonitorCheck)
                 lastStats = self._statsAudit(lastStats)
                 lastCleanup = self._cleanupAudit(lastCleanup)
                 try:
@@ -642,6 +649,31 @@ class Processor(object):
 
         return now
 
+
+    def _monitorCheckAudit(self, lastTime):
+        """See if the database thinks we have any running tasks that don't
+        have matching pid files (meaning they've died).
+        """
+        now = time.time()
+        if now - lastTime < self.MONITOR_CHECK_INTERVAL:
+            return lastTime
+
+        toKill = set()
+        if now - self._lastMonitorCheckKill >= self.KILL_INTERVAL:
+            # See if any of our tasks need to be killed
+            tids = self._monitors.keys()
+            toKill = set(self.taskConnection.getTasksToKill(tids))
+            self._lastMonitorCheckKill = now
+
+        # Copy monitors, since we might remove some as we go along
+        lastMonitors = self._monitors.copy()
+        for tid, checkArgs in lastMonitors.iteritems():
+            shouldKill = (tid in toKill)
+            self._monitorPid_check(*checkArgs, shouldKill = shouldKill)
+
+        return now
+
+
     def _monitorCurrentPids(self):
         """Spawn a monitor for each task in the pids folder; used on init and
         could be used by sanity checks.  Will not double monitor any tasks.
@@ -669,97 +701,76 @@ class Processor(object):
 
         latestStart - See _monitorPid_thread
         """
-        t = threading.Thread(
-            target=self._monitorPid_thread
-            , args=(tid, pid, latestStart, childProcessPoll)
-        )
-        t.daemon = True
+        t = (tid, pid, latestStart, childProcessPoll)
         self._monitors[tid] = t
-        t.start()
         self.log("Monitoring task {0}:{1}".format(tid, pid))
     
-    def _monitorPid_thread(self, tid, pid, latestStart, childProcessPoll):
-        """Monitors the given process until it terminates.  This thread is
-        daemonic; that is, it is assumed insignificant if it dies (it must
-        be able to recover).
+    def _monitorPid_check(self, tid, pid, latestStart, 
+            childProcessPoll, shouldKill):
+        """A function that may be used to poll-monitor the given 
+        process.  Runs in the main processor thread periodically to keep the
+        thread count down.
 
-        Also responsible for polling the database periodically to see if a 
-        "kill" command has been issued for our task.
+        The function takes one argument - shouldKill, which is True if this
+        processor is not threaded and the task that this function is responsible
+        for should be terminated.
 
         This thread is responsible for cleaning up the pid file on task
-        completion.
+        completion if the pid file is not already cleaned up.
 
         latestStart - An upper bound on the start time for the process.  Used
             for preventing database corruption on task death.
         childProcessPoll - If set, a parameterless method to poll the child
             process.  This is used to "retire" zombie processes.
         """
-        while True:
+        try:
             try:
-                # While os.waitpid() would be more efficient, we need to check
-                # periodically to see if our task's state has been changed to
-                # kill.  So we do a rather lazy check.
-                # Fortunately, this also works on non-child processes
-                # (os.waitpid does not)
-                lastKillCheck = time.time()
-                while True:
-                    try:
-                        if childProcessPoll:
-                            childProcessPoll()
-                        os.kill(pid, 0)
-                        if self._useThreading:
-                            if not os.path.exists(self._getPidFile(tid)):
-                                # Task marked as done, don't need to wait
-                                # on pid to exit
-                                raise OSError
-                        else:
-                            # Check for kill status?
-                            now = time.time()
-                            if lastKillCheck + self.KILL_INTERVAL >= now:
-                                lastKillCheck = now
-                                if (
-                                        len(self.taskConnection.getTasksToKill(
-                                            [ tid ]))
-                                        == 1
-                                    ):
-                                    # Send a terminate message, and sleep again
-                                    os.kill(pid, signal.SIGTERM)
-                                    # Ensure that the next kill signal isn't
-                                    # sent for a larger interval, to prevent
-                                    # killing cleanup code
-                                    lastKillCheck += self.KILL_TOLERANCE
-                        time.sleep(min(self.KILL_INTERVAL, 0.5))
-                    except OSError:
-                        # Task must be dead
-                        break
-            except Exception, e:
-                self.log("Monitor exception for {0}:{1} - {2}".format(
-                    tid, pid, e
-                ))
-            else:
-                # The only way to reach here is for the process to have died.
-                # We want to clean up the pid file and ensure that the database
-                # entry is OK.
-                try:
-                    pidFile = self._getPidFile(tid)
-                    if os.path.exists(pidFile):
-                        # Illegal task exit, mark dead
-                        self.taskConnection.taskDied(tid, latestStart
-                            , 'Illegal task exit'
-                        )
-                        os.remove(pidFile)
-                except Exception, e:
-                    self.log(
-                        "Monitor exception in end for {0}:{1} - {2}".format(
-                            tid, pid, e.__class__.__name__ + ': ' + str(e)
-                        )
-                    )
-                break
+                if childProcessPoll:
+                    childProcessPoll()
+                os.kill(pid, 0)
+                if self._useThreading:
+                    if not os.path.exists(self._getPidFile(tid)):
+                        # Task marked as done, don't need to wait
+                        # on pid to exit
+                        raise OSError
+                elif shouldKill:
+                    # Send a terminate message, and sleep again
+                    os.kill(pid, signal.SIGTERM)
 
-        # Try to add a new process
-        self._monitors.pop(tid, None)
-        self._startTaskQueue.put('any')
-        self.log("Monitor finished {0}:{1}".format(tid, pid))
+                # If we get here, task is OK.  Just return to skip cleanup
+                # code
+                return
+            except OSError:
+                # Task must be dead, skip to else section
+                pass
+        except Exception, e:
+            self.log("Monitor exception for {0}:{1} - {2}".format(
+                tid, pid, e
+            ))
+        else:
+            # The only way to reach here is for the process to have died.
+            # We want to clean up the pid file and ensure that the database
+            # entry is OK.
+            try:
+                pidFile = self._getPidFile(tid)
+                if os.path.exists(pidFile):
+                    # Illegal task exit, mark dead
+                    self.taskConnection.taskDied(tid, latestStart
+                        , 'Illegal task exit'
+                    )
+                    os.remove(pidFile)
+
+                # Try to add a new process to queue, and log that we're done
+                self._monitors.pop(tid, None)
+                self._startTaskQueue.put('any')
+                self.log("Monitor finished {0}:{1}".format(tid, pid))
+            except Exception, e:
+                self.log(
+                    "Monitor exception in end for {0}:{1} - {2}".format(
+                        tid, pid, e.__class__.__name__ + ': ' + str(e)
+                    )
+                )
+
 
     def _schedulerAudit(self, lastTime):
         """Checks if we need to batch up a new scheduler audit task and returns
