@@ -919,11 +919,10 @@ class _ProcessorSlave(multiprocessing.Process):
         try:
             while True:
                 try:
-                    # See if we should still be running...
+                    # See if we should be marked as accepting new tasks from
+                    # the Processor
                     if self._isAccepting.value:
                         self._checkAccepting()
-                    if not self._shouldContinue():
-                        break
 
                     # Check tasks are running
                     self._checkRunning()
@@ -953,6 +952,14 @@ class _ProcessorSlave(multiprocessing.Process):
                     self._processor.log("Slave error {0}: {1}".format(
                         self.pid, traceback.format_exc()
                     ))
+
+                # After each iteration, see if we're alive
+                if not self._shouldContinue():
+                    break
+        except:
+            self._processor.log("Slave error {0}: {1}".format(
+                self.pid, traceback.format_exc()
+            ))
         finally:
             pass
 
