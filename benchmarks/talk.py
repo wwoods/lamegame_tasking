@@ -6,13 +6,15 @@ import shutil
 import sys
 import threading
 import time
+import traceback
 
 sys.path.insert(0, '.')
 
 import lgTask
 from benchmarks.common import createAndChdir, runProcessor
 
-TEST_TIME = 15.0
+TEST_TIME = 45.0
+REDIS_PORTS = [ 6379, 8888 ]
 
 class DumpTaskBase(lgTask.Task):
     def dump(self, key, objs):
@@ -49,7 +51,7 @@ class DumpTaskBase(lgTask.Task):
             self.dump(key, pkg)
             tsent += len(pkg)
         #print("TOTAL SENT: {0}".format(tsent))
-        self.taskConnection.createTask(self.__class__.__name__)
+        self.taskConnection.createTask(self.__class__.__name__, key=key)
 
 
 class DumpTaskMongo(DumpTaskBase):
@@ -59,9 +61,7 @@ class DumpTaskMongo(DumpTaskBase):
 
 class DumpTaskRedis(DumpTaskBase):
     def run(self, key):
-        port = 6379
-        if key == '2':
-            port = 8888
+        port = REDIS_PORTS[(int(key) - 1) % len(REDIS_PORTS)]
         import redis
         self._redis = redis.StrictRedis(port=port, db=0)
         DumpTaskBase.run(self, key)
@@ -93,9 +93,9 @@ class DumpTaskTalk(DumpTaskBase):
         self.tc.send(key, objs, timeout = 15.0, noRaiseOnTimeout=True)
 
 
-class DumpTaskFastest(lgTask.Task):
+class DumpTaskSpeed(DumpTaskBase):
     def dump(self, key, obj):
-        time.sleep(1.0)
+        time.sleep(0.1)
 
 
 class ReadTaskBase(lgTask.Task):
@@ -126,7 +126,7 @@ class ReadTaskBase(lgTask.Task):
                 { 'value': totalVal, 'count': totalCount, 'latency': lag }
             )
         #print("TOTAL RECV'D {0}".format(tr))
-        self.taskConnection.createTask(self.__class__.__name__)
+        self.taskConnection.createTask(self.__class__.__name__, key=key)
 
 
 class ReadTaskMongo(ReadTaskBase):
@@ -140,9 +140,7 @@ class ReadTaskMongo(ReadTaskBase):
 
 class ReadTaskRedis(ReadTaskBase):
     def run(self, key):
-        port = 6379
-        if key == '2':
-            port = 8888
+        port = REDIS_PORTS[(int(key) - 1) % len(REDIS_PORTS)]
         import redis
         self._redis = redis.StrictRedis(port=port, db=0)
         ReadTaskBase.run(self, key)
@@ -182,23 +180,22 @@ class ReadTaskTalk(ReadTaskBase):
         return objs
 
 
-class ReadTaskFastest(ReadTaskBase):
-    def getObjs(self):
+class ReadTaskSpeed(ReadTaskBase):
+    def getObjs(self, key):
         return DumpTaskBase.getObjects()
 
 
-def doTest():
+def doTest(testType = 'talk'):
     x = 6
     y = 6
     print("""Benchmarking # of messages through pipe with {0} pushing 
             tasks and {1} pulling tasks with object sizes of 0.5 KB spread 
             over 3 keys and batch size of 200 objects""".format(x, y))
-    c = createAndChdir([ 'talk' ], threaded = True)
+    c = createAndChdir([ 'talk' ], threaded = False)
 
     cc = c._database['test']
     #cc.save({ '_id': 'count', 'value': 0, 'count': 0 })
 
-    testType = 'talk'
     keys = [ '1', '2', '3' ]
     def getKey(index):
         return keys[index % len(keys)]
@@ -218,7 +215,19 @@ def doTest():
         pass
     elif testType == 'redis':
         # 3500 /s avg
+        # Ensure all instances are running
         import redis
+        for p in REDIS_PORTS:
+            try:
+                r = redis.StrictRedis(port=p, db=0)
+                try:
+                    r.dbsize()
+                finally:
+                    r.connection_pool.disconnect()
+            except:
+                print(traceback.format_exc())
+                raise Exception(("Ensure redis is running on {} ({} redises "
+                        + "needed)").format(p, len(REDIS_PORTS)))
         r = redis.StrictRedis(db=0)
         for k in keys:
             r.delete(k)
@@ -257,11 +266,23 @@ def doTest():
         totalCount += doc['count']
         totalVal += doc['value']
         totalLag += doc['latency'] * doc['count']
-    totalLag /= totalCount
+    if totalCount > 0:
+        totalLag /= totalCount
     print("{0} / {1:.2f} s avg lag".format(totalCount, totalLag))
-    print("Avg {0}".format(totalCount / (b - a)))
+    avg = totalCount / (b - a)
+    print("{} avg msgs/sec".format(avg))
+    return avg
 
 
 if __name__ == '__main__':
-    doTest()
+    if len(sys.argv) > 1:
+        doTest(sys.argv[1])
+    else:
+        # all
+        results = []
+        for t in [ 'speed', 'talk', 'redis', 'mongo', 'rabbitmq' ]:
+            results.append((t, doTest(t)))
+        print("-" * 79)
+        for t, r in results:
+            print("{0}: {1} msg/sec".format(t, r))
 
