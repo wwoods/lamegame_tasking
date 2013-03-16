@@ -1,5 +1,6 @@
 
-import cPickle as pickle
+#import cPickle as pickle
+import rfoo.marsh as pickle
 import os
 import random
 import shutil
@@ -14,7 +15,7 @@ import lgTask
 from benchmarks.common import createAndChdir, runProcessor
 
 TEST_TIME = 45.0
-REDIS_PORTS = [ 6379, 8888 ]
+REDIS_PORTS = [ 6379 ]#, 8888 ]
 
 class DumpTaskBase(lgTask.Task):
     def dump(self, key, objs):
@@ -280,7 +281,9 @@ if __name__ == '__main__':
     else:
         # all
         results = []
-        for t in [ 'speed', 'talk', 'redis', 'mongo', 'rabbitmq' ]:
+        testOrder = [ 'speed', 'talk', 'redis', 'mongo', 'rabbitmq' ]
+        testOrder = list(reversed(testOrder))
+        for t in testOrder:
             results.append((t, doTest(t)))
         print("-" * 79)
         for t, r in results:
