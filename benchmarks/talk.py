@@ -1,5 +1,5 @@
-
 #import cPickle as pickle
+# rfoo.marsh is faster
 import rfoo.marsh as pickle
 import os
 import random
@@ -14,7 +14,7 @@ sys.path.insert(0, '.')
 import lgTask
 from benchmarks.common import createAndChdir, runProcessor
 
-TEST_TIME = 45.0
+TEST_TIME = 10.0
 REDIS_PORTS = [ 6379 ]#, 8888 ]
 
 class DumpTaskBase(lgTask.Task):
@@ -54,6 +54,9 @@ class DumpTaskBase(lgTask.Task):
         #print("TOTAL SENT: {0}".format(tsent))
         self.taskConnection.createTask(self.__class__.__name__, key=key)
 
+# Generate objs beforehand, to not include that as any part of the tests
+DumpTaskBase.getObjects()
+
 
 class DumpTaskMongo(DumpTaskBase):
     def dump(self, key, objs):
@@ -71,7 +74,7 @@ class DumpTaskRedis(DumpTaskBase):
         self._redis.lpush(key, pickle.dumps(objs))
 
 
-class DumpTaskRabbit(DumpTaskBase):
+class DumpTaskRabbitmq(DumpTaskBase):
     def run(self, key):
         import pika
         self.conn = pika.BlockingConnection()
@@ -155,7 +158,7 @@ class ReadTaskRedis(ReadTaskBase):
         return o
 
 
-class ReadTaskRabbit(ReadTaskBase):
+class ReadTaskRabbitmq(ReadTaskBase):
     def run(self, key):
         import pika
         self.conn = pika.BlockingConnection()
@@ -186,7 +189,21 @@ class ReadTaskSpeed(ReadTaskBase):
         return DumpTaskBase.getObjects()
 
 
-def doTest(testType = 'talk'):
+# For better test isolation...
+def doTest(testType):
+    import multiprocessing
+    pipe = multiprocessing.Queue()
+    proc = multiprocessing.Process(target = _collectTest, args=(testType, pipe))
+    proc.start()
+    proc.join()
+    return pipe.get()
+
+
+def _collectTest(testType, pipe):
+    pipe.put(_doTest(testType))
+
+
+def _doTest(testType):
     x = 6
     y = 6
     print("""Benchmarking # of messages through pipe with {0} pushing 
@@ -282,7 +299,7 @@ if __name__ == '__main__':
         # all
         results = []
         testOrder = [ 'speed', 'talk', 'redis', 'mongo', 'rabbitmq' ]
-        testOrder = list(reversed(testOrder))
+        #testOrder = list(reversed(testOrder))
         for t in testOrder:
             results.append((t, doTest(t)))
         print("-" * 79)
