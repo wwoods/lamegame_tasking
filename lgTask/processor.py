@@ -408,7 +408,9 @@ class Processor(object):
         '''
 
     def stop(self, timeout = 5.0):
-        """Halt an asynchronously started processor (again, test only)
+        """Halt an asynchronously started processor (only use this for tests!).
+
+        Also kills all tasks.
 
         timeout -- Max # of seconds to run
         """
@@ -416,6 +418,18 @@ class Processor(object):
         self._thread.join(timeout)
         if self._thread.is_alive():
             self._thread.raiseException(_ProcessorStop)
+        while self._thread.is_alive():
+            time.sleep(0.1)
+        # Now kill our tasks
+        pids = [ d[1] for d in self._monitors.itervalues() ]
+        for p in pids:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError, e:
+                if e.errno == 3:
+                    # No such process
+                    continue
+                raise
 
 
     def _cleanupAudit(self, lastCleanup):
@@ -429,7 +443,7 @@ class Processor(object):
         if now - lastCleanup > self.CLEANUP_INTERVAL:
             self._cleanupThread = threading.Thread(
                 target = self._cleanupThreadTarget
-            );
+            )
             self._cleanupThread.daemon = True
             self._cleanupThread.start()
             return now
