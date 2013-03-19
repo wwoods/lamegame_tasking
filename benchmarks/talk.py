@@ -17,7 +17,7 @@ from benchmarks.common import createAndChdir, runProcessor
 
 TEST_TIME = 10.0
 OBJECT_COUNT = 20
-OBJECT_EXTRA_STUFF = 128  # 1280 works out to about 6KB
+OBJECT_EXTRA_STUFF = 120  # 1280 works out to about 6KB
 REDIS_PORTS = [ 6379 ]#, 8888 ]
 
 class DumpTaskBase(lgTask.Task):
@@ -48,8 +48,6 @@ class DumpTaskBase(lgTask.Task):
     def run(self, key):
         """Dump!"""
         e = time.time() + TEST_TIME + 0.3
-        # Dump values from 1 to 10, but cube them.  This way, if messages are
-        # routinely dropped, the overall average will change dramatically
         tsent = 0
         while time.time() < e:
             pkg = self.getObjects()
@@ -95,7 +93,7 @@ class DumpTaskTalk(DumpTaskBase):
 
 
     def dump(self, key, objs):
-        self.tc.send(key, objs, timeout = 15.0, noRaiseOnTimeout=True)
+        self.talk_sendBuffered(key, objs, timeout = 15.0)
 
 
 class DumpTaskSpeed(DumpTaskBase):
@@ -181,7 +179,7 @@ class ReadTaskTalk(ReadTaskBase):
 
 
     def getObjs(self, key):
-        objs = self.tc.recv(key, batchSize = 200, timeout = 5.0)
+        objs = self.tc.recv(key, batchSize = OBJECT_COUNT, timeout = 5.0)
         return objs
 
 
@@ -204,17 +202,27 @@ def _collectTest(testType, pipe):
     pipe.put(_doTest(testType))
 
 
+def _rsize(o):
+    if isinstance(o, dict):
+        return sum([ _rsize(v) for v in o.itervalues() ])
+    elif isinstance(o, list):
+        return sum([ _rsize(v) for v in o ])
+    return sys.getsizeof(o)
+
+
 def _doTest(testType):
 
     # Generate objs beforehand, to not include that as any part of the tests
-    DumpTaskBase.getObjects()
+    objs = DumpTaskBase.getObjects()
+    objSize = _rsize(objs[0])
 
     x = 6
     y = 6
-    print("""Benchmarking # of messages through pipe with {0} pushing 
-            tasks and {1} pulling tasks with object sizes of 0.5 KB spread 
-            over 3 keys and batch size of 200 objects""".format(x, y))
-    c = createAndChdir([ 'talk' ], threaded = False)
+    print("""Benchmarking # of messages through pipe with {} pushing
+            tasks and {} pulling tasks with object sizes of {} KB spread
+            over 3 keys and batch size of {} objects""".format(x, y,
+                objSize / 1024, OBJECT_COUNT))
+    c = createAndChdir([ 'talk' ], threaded = True)
 
     cc = c._database['test']
     #cc.save({ '_id': 'count', 'value': 0, 'count': 0 })
@@ -299,7 +307,7 @@ def _doTest(testType):
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
-        doTest(sys.argv[1])
+        results = [ (sys.argv[1], doTest(sys.argv[1])) ]
     else:
         # all
         results = []
@@ -307,10 +315,10 @@ if __name__ == '__main__':
         #testOrder = list(reversed(testOrder))
         for t in testOrder:
             results.append((t, doTest(t)))
-        print("-" * 79)
-        scalar = (1.0 * len(rfoo.marsh.dumps(DumpTaskBase.getObjects()))
-                / len(DumpTaskBase.getObjects()) / 1024 / 1024)
-        print("Object size in MB: {0}".format(scalar))
-        for t, r in results:
-            print("{0}: {1} objs/sec; {2} MB/s".format(t, r, r * scalar))
 
+    print("-" * 79)
+    scalar = (1.0 * len(rfoo.marsh.dumps(DumpTaskBase.getObjects()))
+            / len(DumpTaskBase.getObjects()) / 1024 / 1024)
+    print("Object size in MB: {0}".format(scalar))
+    for t, r in results:
+        print("{0}: {1} objs/sec; {2} MB/s".format(t, r, r * scalar))

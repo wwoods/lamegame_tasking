@@ -109,7 +109,10 @@ def _runTask(
                     datetime.datetime.utcnow().isoformat()
                 ))
 
-            success = task.run(**kwargs)
+            try:
+                success = task.run(**kwargs)
+            finally:
+                task._Task_finalize()
             if success is None:
                 # No return value means success
                 success = True

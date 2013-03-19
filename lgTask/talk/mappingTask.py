@@ -49,5 +49,5 @@ class MappingTask(lgTask.LoopingTask):
             # We may have objects with different return addresses, so make
             # sure we keep them separate
             toSend.setdefault(o[0], []).append(( o[1], mapped[i] ))
-        self._talk.sendMultiple(toSend, timeout = self._SEND_TIMEOUT)
+        self.talk_sendMultipleBuffered(toSend, timeout = self._SEND_TIMEOUT)
 

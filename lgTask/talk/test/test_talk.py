@@ -37,12 +37,13 @@ class TestTalk(TestCase):
             f.write('pythonPath = [ "../" ]\n')
         # Put it in an array to get around python thinking it should be
         # bound to this class
-        cls.procKill = [ lgTask.Processor.fork(home = ph) ]
+        cls.processor = lgTask.Processor(home = ph)
+        cls.processor.start()
 
 
     @classmethod
     def tearDownClass(cls):
-        cls.procKill[0]()
+        cls.processor.stop()
 
 
     def setUp(self):
@@ -56,19 +57,33 @@ class TestTalk(TestCase):
         recvKey = uuid.uuid4().hex
         self.tc.createTask('RouterTask')
         #self.talk.registerHandler('toRoute', 'RouterTask', max = 2)
-        self.talk.send('toRoute', [ [ 'a', recvKey ], [ 'b', recvKey ] ]
-                , timeout = 5.0)
+        try:
+            self.talk.send('toRoute', [ [ 'a', recvKey ], [ 'b', recvKey ] ],
+                    timeout = 5.0)
+        finally:
+            print(list(self.talk._colSender.find()))
+            print(list(self.tc._database[self.tc.TASK_COLLECTION].find()))
         r = self.talk.recv(recvKey, batchSize = 2, timeout = 5.0)
         print("GOT: {0}".format(r))
         self.assertEqual('a', r[0])
         self.assertEqual('b', r[1])
 
         # Round 2!
-        self.talk.send('toRoute', [ [ 'a', recvKey ], [ 'b', recvKey ] ] * 900
-                , timeout = 10.0)
+        self.talk.send('toRoute', [ [ 'a', recvKey ], [ 'b', recvKey ] ] * 900,
+                timeout = 10.0)
         for _ in range(9):
             r = self.talk.recv(recvKey, batchSize = 200, timeout = 5.0)
             self.assertEqual([ 'a', 'b' ] * 100, r)
+
+
+    def test_talkBufferFailure(self):
+        tid = self.tc.createTask('RouterBufferFailureTask')
+        while self.tc.getTask(tid)['state'] not in self.tc.states.DONE_GROUP:
+            time.sleep(0.01)
+        log = open(self.processor.getPath("logs/{}.log".format(tid))).read()
+        self.assertIn(
+                "TalkTimeoutError: 1 buffered sends did not send 2 objects",
+                log)
 
 
     def test_mappingTask(self):

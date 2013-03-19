@@ -26,6 +26,7 @@ class Task(object):
         self.taskId = taskId
         self._thread = None
         self._logs = []
+        self._Task_talkBuffer = None
 
     def __str__(self):
         type = self.__class__.__name__
@@ -85,6 +86,8 @@ class Task(object):
         Important: after timeout, blocks for 2 additional seconds before 
         returning since we raise an exception in the running thread's stack.
         """
+        # Note - this is kept here in case I'm wrong and it is used...
+        raise NotImplementedError("THIS IS OBSOLETE AND SHOULD NOT BE USED")
         if not self._thread:
             raise Exception("Task never start()ed")
         
@@ -92,6 +95,12 @@ class Task(object):
         self._thread.join(timeout)
         if self._thread.is_alive():
             self._thread.raiseException(self.StopTaskError)
+
+    def talk_sendBuffered(self, key, objects, **kwargs):
+        self._Task_getTalkBuffer().send(key, objects, **kwargs)
+
+    def talk_sendMultipleBuffered(self, keyToObjects, **kwargs):
+        self._Task_getTalkBuffer().sendMultiple(keyToObjects, **kwargs)
             
     def _finished(self, success):
         """Called when the task finishes; must be callable multiple times,
@@ -99,6 +108,16 @@ class Task(object):
         """
         raise NotImplementedError("Obsolete; same as start()")
         self.taskConnection.taskStopped(self, success, self._logs[-1])
+
+    def _Task_getTalkBuffer(self):
+        if self._Task_talkBuffer is None:
+            self._Task_talkBuffer = _TalkBuffer(self.taskConnection.getTalk())
+        return self._Task_talkBuffer
+
+
+    def _Task_finalize(self):
+        if self._Task_talkBuffer is not None:
+            self._Task_talkBuffer.closeAll()
         
         
         
@@ -125,4 +144,42 @@ class _TaskThread(InterruptableThread):
             # Exception block above would have caught it.  So we must
             # have been interrupted in _finished.
             self.task._finished(success)
-            
+
+
+class _TalkBuffer(object):
+    def __init__(self, talkConnection):
+        self.c = talkConnection
+        self.requests = []
+
+
+    def closeAll(self):
+        """Finalization method; close all open requests (waiting for their
+        specified timeout).  Will raise an exception if any request did not
+        send all of its messages prior to timing out."""
+        failed = []
+        for r in self.requests:
+            r.wait()
+            if r.count != 0:
+                # Didn't all send
+                failed.append(r)
+        if failed:
+            from lgTask.talk.error import TalkTimeoutError
+            raise TalkTimeoutError("{0} buffered sends did not send {1} objects"
+                    .format(len(failed), sum([ f.count for f in failed ])))
+
+
+    def send(self, key, objects, **kwargs):
+        self.sendMultiple({ key: objects }, **kwargs)
+
+
+    def sendMultiple(self, keyToObjects, **kwargs):
+        srs = self.c.sendMultiple(keyToObjects, _async = True, **kwargs)
+        i = len(self.requests)
+        while i > 0:
+            i -= 1
+            r = self.requests[i]
+            if r.poll():
+                # Close it out and remove it
+                r.wait(0)
+                self.requests.pop(i)
+        self.requests.extend(srs)

@@ -23,8 +23,8 @@ try:
                 return talkServer.getObjects(*args, **kwargs)
         server = rfoo.InetServer(_RfooRpcClient)
         thread = threading.Thread(
-            target = server.start
-            , kwargs = dict(host = '0.0.0.0', port = 0)
+            target = server.start,
+            kwargs = dict(host = '0.0.0.0', port = 0)
         )
         thread.daemon = True
         thread.start()
@@ -172,7 +172,8 @@ class _SendRequest(object):
     priority.  Represents a thread sitting on send()
     """
 
-    def __init__(self, priority, objects):
+    def __init__(self, endTime, priority, objects):
+        self._endTime = endTime
         self._priority = priority
         self._objects = objects
         self._sent = 0
@@ -195,6 +196,17 @@ class _SendRequest(object):
     @property
     def priority(self):
         return self._priority
+
+
+    def poll(self):
+        """Returns True if this request is done or should be done; False
+        otherwise.  You must call wait(0) after this if you're using it to stop
+        the request.
+        """
+        with self._lock:
+            if self._eventDone.isSet() or time.time() >= self._endTime:
+                return True
+        return False
 
 
     def sendTo(self, results, desired, batchSize):
@@ -224,12 +236,18 @@ class _SendRequest(object):
         return nr
 
 
-    def wait(self, time):
-        """Wait for up to time seconds to get everything sent
+    def wait(self, seconds = None):
+        """Wait for up to seconds to get everything sent
+
+        seconds [double] -- Time to wait before closing this request.  May be
+                unspecified to wait for the actual endTime specified
         
         Returns number of items actually sent before time ran out.
         """
-        if self._eventDone.wait(time) is False:
+        timeToWait = seconds
+        if timeToWait is None:
+            timeToWait = max(0, self._endTime - time.time())
+        if self._eventDone.wait(timeToWait) is False:
             with self._lock:
                 # Avoid race condition, check again now that we have lock
                 if not self._eventDone.isSet():
@@ -290,15 +308,15 @@ class _Server(object):
 
         Returns a tuple: (numSent, objsReceived)
         """
+        # Keep track of when we'll be done
+        e = time.time() + timeout
+
         srs = []
         for key, objs in keysToObjects.iteritems():
             kd = self._getKeyData(key)
-            sr = _SendRequest(priority, objs)
+            sr = _SendRequest(e, priority, objs)
             kd.addRequest(sr)
             srs.append(sr)
-
-        # Keep track of when we'll be done
-        e = time.time() + timeout
 
         # Now do the recv
         objsReceived = recvFunction(recvKey, batchSize = recvBatch,
@@ -309,16 +327,21 @@ class _Server(object):
             r += sr.wait(0)
         return (r, objsReceived)
 
-    def sendObjects(self, priority, keysToObjects, timeout):
+    def sendObjects(self, priority, keysToObjects, timeout, async):
         """Called locally.  Hands off objects to a local listener when asked
         to send objects.  Returns # actually sent
         """
+        e = time.time() + timeout
+
         srs = []
         for key, objs in keysToObjects.iteritems():
             kd = self._getKeyData(key)
-            sr = _SendRequest(priority, objs)
+            sr = _SendRequest(e, priority, objs)
             kd.addRequest(sr)
             srs.append(sr)
+
+        if async:
+            return srs
 
         r = srs[0].wait(timeout)
         for sr in srs[1:]:
@@ -332,11 +355,11 @@ class _Server(object):
         """
         dId = self._getColSendId(key)
         newDoc = {
-            '_id': dId
-            , 'key': key
-            , 'priority': priority
-            , 'count': count
-            , 'uri': self._uri
+            '_id': dId,
+            'key': key,
+            'priority': priority,
+            'count': count,
+            'uri': self._uri
         }
         self._colSender.update({ '_id': dId }, newDoc, upsert = True)
 
@@ -462,8 +485,8 @@ class TalkConnection(object):
     _proxies = {}
     _proxies_doc = """{ uri : [ proxy ] } for all active proxies."""
 
-    def __init__(self, taskConnection, sendTimeout = 60.0
-            , recvBatchTime = 0.4, recvTimeout = 60.0):
+    def __init__(self, taskConnection, sendTimeout = 60.0,
+            recvBatchTime = 0.4, recvTimeout = 60.0):
         self._tc = taskConnection
         self._colSender = self._tc._database[self.TALK_SENDER_COLLECTION]
         self._colHandler = self._tc._database[self.TALK_HANDLER_COLLECTION]
@@ -483,10 +506,13 @@ class TalkConnection(object):
 
 
     def sendMultiple(self, keysToObjects, timeout = None, priority = 0,
-            noRaiseOnTimeout = False):
+            noRaiseOnTimeout = False, _async = False):
         """Sends the given objects to a receiver with the specified keys.
 
         keysToObjects -- { key: [ objects ]} objects to send
+
+        _async -- If True, returns the _SendRequest objects.  Internally used
+                by tasks.
 
         Raises a TalkTimeoutError if not all objects are sent, unless 
         noRaiseOnTimeout is specified as True.  
@@ -502,8 +528,9 @@ class TalkConnection(object):
             return 0
         if not hasattr(self, '_server'):
             self._server = _Server.get(self._tc._database)
-        r = self._server.sendObjects(priority, keysToObjects, timeout)
-        if r != allObjs and not noRaiseOnTimeout:
+        r = self._server.sendObjects(priority, keysToObjects, timeout,
+                async = _async)
+        if not _async and r != allObjs and not noRaiseOnTimeout:
             raise TalkTimeoutError("Sent {0}".format(r))
         return r
 
@@ -532,10 +559,10 @@ class TalkConnection(object):
         if not hasattr(self, '_server'):
             self._server = _Server.get(self._tc._database)
         sent, objsReceived = self._server.sendAndRecvObjects(
-                priority, { key: objsToSend }
-                , recvKey = myResponseQueue, recvBatch = numObjs
-                , recvFunction = self.recv
-                , timeout = timeout
+                priority, { key: objsToSend },
+                recvKey = myResponseQueue, recvBatch = numObjs,
+                recvFunction = self.recv,
+                timeout = timeout
         )
         results = [ None ] * numObjs
         for r in objsReceived:
@@ -544,8 +571,8 @@ class TalkConnection(object):
         return results
 
 
-    def recv(self, keyOrKeys, batchSize = 1, batchTime = None
-            , timeout = None, raiseOnTimeout = False):
+    def recv(self, keyOrKeys, batchSize = 1, batchTime = None,
+            timeout = None, raiseOnTimeout = False):
         """Receive zero or up to batchSize objects with the specified key or 
         keys.
 
@@ -584,16 +611,16 @@ class TalkConnection(object):
             # trick.
             recvFrom = self._colSender.find_one(
                 {
-                    'key': { '$in': keys }
-                    , 'count': { '$gt': 0 }
-                }
-                , sort = [ ('priority', -1), ('count', -1) ]
+                    'key': { '$in': keys },
+                    'count': { '$gt': 0 }
+                },
+                sort = [ ('priority', -1), ('count', -1) ]
             )
             if recvFrom is not None:
                 r = self._colSender.update(
-                    { '_id': recvFrom['_id'], 'count': recvFrom['count'] }
-                    , { '$inc': { 'count': -left } }
-                    , safe = True
+                    { '_id': recvFrom['_id'], 'count': recvFrom['count'] },
+                    { '$inc': { 'count': -left } },
+                    safe = True
                 )
                 if not r.get('updatedExisting'):
                     # Someone else got there first
@@ -610,8 +637,12 @@ class TalkConnection(object):
                 , sort = { 'count': -1 }
             )
             if recvFrom is not None:'''
-                with self._getAndLockProxy(recvFrom['uri']) as p:
-                    newObjs = p.getObjects(recvFrom['key'], left, batchSize)
+                try:
+                    with self._getAndLockProxy(recvFrom['uri']) as p:
+                        newObjs = p.getObjects(recvFrom['key'], left, batchSize)
+                except socket.error:
+                    # Proxy no longer exists, try another
+                    continue
                 objs.extend(newObjs)
                 if len(newObjs) == 0:
                     # We didn't do anything...
@@ -643,14 +674,14 @@ class TalkConnection(object):
         to handle the load from send()s in the system.
         """
         self._colHandler.update(
-            { '_id': key }
-            , {
-                '_id': key
-                , 'taskClass': taskClass
-                , 'taskKwargs': taskKwargs or {}
-                , 'max': max
-            }
-            , upsert = True
+            { '_id': key },
+            {
+                '_id': key,
+                'taskClass': taskClass,
+                'taskKwargs': taskKwargs or {},
+                'max': max
+            },
+            upsert = True
         )
 
 

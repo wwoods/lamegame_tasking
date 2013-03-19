@@ -16,6 +16,12 @@ class RouterTask(LoopingTask):
         talk.sendMultiple(toSend)
 
 
+class RouterBufferFailureTask(Task):
+    def run(self):
+        self.talk_sendBuffered('hey', [ { 'a': 'b' }, { 'a': 'c' } ],
+                timeout = 0.001)
+
+
 class Calculator(MappingTask):
     TALK_KEY = 'calc'
     BATCH_SIZE = 1
